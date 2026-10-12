@@ -67,9 +67,9 @@ Keep it under 65 words.
                         "X-Title": "Diamond-Protect UPI Security"
                     },
                     json={
-                        "model": "meta-llama/llama-3.2-3b-instruct:free",
+                        "model": "openrouter/auto",
                         "messages": [
-                            {"role": "system", "content": "You are Diamond-Protect's AI Risk Advisor."},
+                            {"role": "system", "content": "You are Diamond-Protect's AI Risk Advisor for Indian UPI transactions. Provide concise, friendly, protective advice."},
                             {"role": "user", "content": prompt}
                         ],
                         "temperature": 0.2,
