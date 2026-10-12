@@ -166,7 +166,11 @@ def graph_profile(receiver_id: str, graph_engine=None) -> Dict[str, Any]:
         clusters = graph_engine.detect_mule_rings() or {}
     except Exception:
         clusters = {}
-    hub_hit = next((h for h in clusters.get("hub_mules", []) if h.get("node") == receiver_id), None)
+    hub_hit = next(
+        (h for h in clusters.get("hub_mules", [])
+         if h.get("node") == receiver_id and h.get("role") == "HUB_MULE"),
+        None,
+    )
 
     nodes = g.number_of_nodes() or 1
     avg_degree = round((g.number_of_edges() / nodes) * 2, 2) if nodes else 0.0
@@ -191,7 +195,7 @@ def graph_profile(receiver_id: str, graph_engine=None) -> Dict[str, Any]:
         "outflow": outflow,
         "drain_ratio": drain,
         "role": role,
-        "is_hub_mule": hub_hit is not None,
+        "is_hub_mule": bool(hub_hit),
         "hub_evidence": hub_hit,
         "network_nodes": g.number_of_nodes(),
         "network_edges": g.number_of_edges(),
@@ -221,29 +225,49 @@ def derive_signals(
     graph = graph_profile(resolved_node, graph_engine)
 
     observed = profile["observed"]
+    graph_observed = graph["observed"]
     latest = profile["latest"] or {}
 
-    # Recorded telemetry for this payee (most recent non-live ledger record).
-    telemetry = {
-        "beneficiary_age_days": int(latest.get("beneficiary_age_days", NEUTRAL_TELEMETRY["beneficiary_age_days"]))
-        if observed else NEUTRAL_TELEMETRY["beneficiary_age_days"],
-        "time_since_beneficiary_added_sec": int(
-            latest.get("time_since_beneficiary_added_sec", NEUTRAL_TELEMETRY["time_since_beneficiary_added_sec"])
-        ) if observed else NEUTRAL_TELEMETRY["time_since_beneficiary_added_sec"],
-        "velocity_10m": int(latest.get("velocity_10m", 0)) if observed else NEUTRAL_TELEMETRY["velocity_10m"],
-        "outflow_ratio_5m": float(latest.get("outflow_ratio_5m", 0.0)) if observed else NEUTRAL_TELEMETRY["outflow_ratio_5m"],
-        "in_degree_1h": int(latest.get("in_degree_1h", 0)) if observed else NEUTRAL_TELEMETRY["in_degree_1h"],
-        "ip_risk_score": float(latest.get("ip_risk_score", 0.05)) if observed else NEUTRAL_TELEMETRY["ip_risk_score"],
-    }
+    # --- telemetry source resolution -----------------------------------------
+    # 1. recorded ledger telemetry for this payee (matches the ML training schema)
+    # 2. otherwise, graph-derived fallback when the node exists in the flow graph
+    # 3. otherwise, neutral values - an unobserved signal is never guessed.
+    if observed:
+        telemetry = {
+            "beneficiary_age_days": int(latest.get("beneficiary_age_days") if latest.get("beneficiary_age_days") is not None
+                                         else NEUTRAL_TELEMETRY["beneficiary_age_days"]),
+            "time_since_beneficiary_added_sec": int(latest.get("time_since_beneficiary_added_sec")
+                                                    if latest.get("time_since_beneficiary_added_sec") is not None
+                                                    else NEUTRAL_TELEMETRY["time_since_beneficiary_added_sec"]),
+            "velocity_10m": int(latest.get("velocity_10m") or 0),
+            "outflow_ratio_5m": float(latest.get("outflow_ratio_5m") or 0.0),
+            "in_degree_1h": int(latest.get("in_degree_1h") or 0),
+            "ip_risk_score": float(latest.get("ip_risk_score") if latest.get("ip_risk_score") is not None else 0.05),
+        }
+        telemetry_source = "ledger_record"
+    elif graph_observed:
+        telemetry = {
+            "beneficiary_age_days": NEUTRAL_TELEMETRY["beneficiary_age_days"],
+            "time_since_beneficiary_added_sec": NEUTRAL_TELEMETRY["time_since_beneficiary_added_sec"],
+            "velocity_10m": 0,
+            "outflow_ratio_5m": float(graph["drain_ratio"]),
+            "in_degree_1h": int(graph["in_degree"]),
+            "ip_risk_score": NEUTRAL_TELEMETRY["ip_risk_score"],
+        }
+        telemetry_source = "graph_fallback"
+    else:
+        telemetry = dict(NEUTRAL_TELEMETRY)
+        telemetry_source = "neutral_unobserved"
 
-    # Independent cross-checks computed from raw evidence (not from stored columns).
+    # Independent cross-checks recomputed from raw evidence (shown as corroboration).
     peak_burst_10m = _peak_burst(profile["timestamps"], 10) if profile["timestamps"] else 0
-    if graph["observed"] and graph["in_degree"] > telemetry["in_degree_1h"]:
-        telemetry["in_degree_1h"] = graph["in_degree"]
-    if graph["observed"] and graph["drain_ratio"] > telemetry["outflow_ratio_5m"]:
-        telemetry["outflow_ratio_5m"] = graph["drain_ratio"]
-    if peak_burst_10m > telemetry["velocity_10m"]:
-        telemetry["velocity_10m"] = peak_burst_10m
+    distinct_senders = profile["distinct_senders"]
+
+    source_label = {
+        "ledger_record": "Recorded on previous payments to this payee (transactions.db)",
+        "graph_fallback": "Derived from live graph topology (ledger has no records for this handle)",
+        "neutral_unobserved": "Not observed - neutral treatment applied",
+    }[telemetry_source]
 
     meta: List[Dict[str, Any]] = [
         {
@@ -252,11 +276,11 @@ def derive_signals(
             "value": telemetry["beneficiary_age_days"],
             "display": f"{telemetry['beneficiary_age_days']} day(s)",
             "observed": observed,
-            "source": "Ledger telemetry (latest record for this payee)" if observed else "Not recorded",
+            "source": source_label,
             "explanation": (
                 "Days since the receiving UPI handle was registered, as recorded on previous payments to it."
                 if observed else
-                "No prior record of this payee exists in the ledger, so the age signal is treated as neutral rather than guessed."
+                "No prior record of this payee exists in the ledger, so the age signal is held neutral rather than guessed."
             ),
         },
         {
@@ -265,7 +289,7 @@ def derive_signals(
             "value": telemetry["time_since_beneficiary_added_sec"],
             "display": f"{telemetry['time_since_beneficiary_added_sec']} s",
             "observed": observed,
-            "source": "Ledger telemetry" if observed else "Not recorded",
+            "source": source_label,
             "explanation": (
                 "Seconds elapsed between the payee being added to the payer's address book and the payment."
                 if observed else "Unobserved - neutral treatment applied."
@@ -276,11 +300,12 @@ def derive_signals(
             "label": "Payment velocity (10 min)",
             "value": telemetry["velocity_10m"],
             "display": f"{telemetry['velocity_10m']} payments / 10 min",
-            "observed": observed or peak_burst_10m > 0,
-            "source": "Peak sliding 10-minute window recomputed from ledger timestamps"
-            if observed else "Not recorded",
+            "observed": observed,
+            "source": source_label,
             "explanation": (
-                "Highest number of payments to this payee inside any single 10-minute window - a burst indicator."
+                "Recorded burst rate of payments to this payee inside a 10-minute window."
+                + (f" Independently recomputed from raw timestamps: peak {peak_burst_10m} payments / 10 min."
+                   if peak_burst_10m else "")
                 if observed else "No historical payments to this payee are on record."
             ),
         },
@@ -289,10 +314,11 @@ def derive_signals(
             "label": "Rapid outflow (drain) ratio",
             "value": telemetry["outflow_ratio_5m"],
             "display": f"{telemetry['outflow_ratio_5m'] * 100:.0f}% forwarded",
-            "observed": observed or graph["observed"],
-            "source": "Graph inflow vs outflow of the payee node" if graph["observed"] else ("Ledger telemetry" if observed else "Not recorded"),
+            "observed": observed or graph_observed,
+            "source": source_label if observed else ("Live graph inflow vs outflow of the payee node" if graph_observed else "Not recorded"),
             "explanation": (
                 "Share of incoming money that leaves the account again almost immediately - the classic mule-drain signature."
+                + (f" Cumulative graph drain for this node: {graph['drain_ratio'] * 100:.0f}%." if graph_observed else "")
             ),
         },
         {
@@ -300,10 +326,12 @@ def derive_signals(
             "label": "Distinct incoming counterparties",
             "value": telemetry["in_degree_1h"],
             "display": f"{telemetry['in_degree_1h']} payers",
-            "observed": observed or graph["observed"],
-            "source": "Graph in-degree of the payee node" if graph["observed"] else ("Ledger telemetry" if observed else "Not recorded"),
+            "observed": observed or graph_observed,
+            "source": source_label if observed else ("Live graph in-degree of the payee node" if graph_observed else "Not recorded"),
             "explanation": (
-                "How many separate accounts funnel money into this handle. Concentration from many payers into one drain account is a hub-mule signature."
+                "How many separate accounts funnel money into this handle. Concentration from many payers into one "
+                "drain account is a hub-mule signature."
+                + (f" The graph shows {graph['in_degree']} distinct inbound counterparties overall." if graph_observed else "")
             ),
         },
         {
@@ -312,7 +340,7 @@ def derive_signals(
             "value": telemetry["ip_risk_score"],
             "display": f"{telemetry['ip_risk_score'] * 100:.0f}% anomaly",
             "observed": observed,
-            "source": "Device telemetry recorded on prior payments" if observed else "Not recorded",
+            "source": source_label,
             "explanation": (
                 "Emulator, proxy or anomalous device fingerprint share recorded against this payee."
                 if observed else "This deployment does not receive device telemetry for an unknown payee, so the signal stays neutral."
@@ -327,13 +355,22 @@ def derive_signals(
         "requested_receiver_id": receiver_id,
         "amount": amount,
         "telemetry": telemetry,
+        "telemetry_source": telemetry_source,
         "meta": meta,
         "profile": {k: v for k, v in profile.items() if k not in ("latest", "timestamps")},
         "latest_record": latest or {},
         "graph": graph,
         "cross_checks": {
             "peak_burst_10m": peak_burst_10m,
+            "distinct_senders": distinct_senders,
             "graph_in_degree": graph["in_degree"],
+            "graph_out_degree": graph["out_degree"],
             "graph_drain_ratio": graph["drain_ratio"],
+            "recorded_velocity": telemetry["velocity_10m"] if observed else None,
+            "agreement": (
+                "corroborated" if observed and graph_observed and (
+                    abs(float(graph["drain_ratio"]) - telemetry["outflow_ratio_5m"]) < 0.25
+                ) else ("single_source" if observed != graph_observed else ("divergent" if graph_observed else "none"))
+            ),
         },
     }

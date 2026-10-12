@@ -9,7 +9,9 @@ import numpy as np
 from backend.core.qr_engine import verify_upi_qr
 
 MODEL_PATH = "d:/Diamond-protect-v2/backend/models/rf_fraud_model.pkl"
-OPENROUTER_API_KEY = "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"
+# Optional: set OPENROUTER_API_KEY in the environment to enable the GenAI narrative.
+# Without it the platform runs fully offline and generates the explanation locally.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 AI_MODELS = ["openai/gpt-4o-mini", "google/gemini-2.0-flash-001", "openrouter/auto"]
 AI_TIMEOUT_SECONDS = 6.0
@@ -256,7 +258,6 @@ class RiskEngine:
                        ml_probability, ml_score, final_score, risk_level,
                        analytics, graph_engine) -> Dict[str, Any]:
         telemetry = signals.get("telemetry", {})
-        signal_meta = {m["key"]: m for m in signals.get("meta", [])}
         graph_info = signals.get("graph", {})
         profile = signals.get("profile", {})
 
@@ -266,14 +267,20 @@ class RiskEngine:
         # ---- Stage 1: QR -------------------------------------------------------
         qr_status = qr_result.get("trust_status", "SKIPPED")
         qr_map = {"VERIFIED": "PASS", "WARNING": "WARN", "PHISHING_MALICIOUS": "FAIL", "SKIPPED": "SKIPPED"}
+        qr_penalty = int(qr_result.get("score_penalty", 0))
         stage1 = {
             "id": 1,
             "key": "qr_integrity",
             "title": "Cryptographic QR & Domain Integrity",
             "standard": "BIS IS 18000 / NPCI UPI payload",
             "status": qr_map.get(qr_status, "SKIPPED"),
-            "score_impact": -int(qr_result.get("score_penalty", 0)),
-            "weight_pct": 40,
+            "trust_status": qr_status,
+            "score_impact": int(round(RULE_WEIGHT * qr_penalty)),
+            "points": int(round(RULE_WEIGHT * qr_penalty)),
+            "weight_pct": 45,
+            "bucket": "rule_engine_45",
+            "qr_penalty": qr_penalty,
+            "note": "This stage's penalty is applied through Rule R7, so Stage 1 and Stage 2 share the same 45% bucket.",
             "summary": {
                 "VERIFIED": "The payload carried a valid HMAC-SHA256 signature over the payee tuple and matched the storefront nameplate.",
                 "WARNING": "The payload parses as a genuine UPI instruction but is unsigned, so tamper-proofing cannot be proven.",
@@ -300,17 +307,24 @@ class RiskEngine:
 
         # ---- Stage 2: rules ----------------------------------------------------
         triggered = [c for c in rule_checks if c["triggered"]]
+        qr_raw = int(qr_result.get("score_penalty", 0))
+        own_raw = max(rule_penalty - qr_raw, 0)
         stage2 = {
             "id": 2,
             "key": "behavioural_rules",
             "title": "Behavioural Heuristic Rule Engine",
             "standard": "DSCI fintech telemetry / fraud-typology rules",
             "status": "FAIL" if rule_penalty >= 50 else ("WARN" if rule_penalty > 0 else "PASS"),
-            "score_impact": int(round(RULE_WEIGHT * rule_penalty)),
+            "score_impact": int(round(RULE_WEIGHT * own_raw)),
+            "points": int(round(RULE_WEIGHT * own_raw)),
             "weight_pct": int(RULE_WEIGHT * 100),
+            "bucket": "rule_engine_45",
+            "own_raw_penalty": own_raw,
             "summary": (
-                f"{len(triggered)} of {len(rule_checks)} rules triggered, contributing {rule_penalty} raw points "
-                f"({int(round(RULE_WEIGHT * rule_penalty))} points after weighting)."
+                f"{len(triggered)} of {len(rule_checks)} rules triggered for {rule_penalty} raw points "
+                f"({int(round(RULE_WEIGHT * rule_penalty))} weighted points, of which "
+                f"{int(round(RULE_WEIGHT * own_raw))} come from behavioural rules and "
+                f"{int(round(RULE_WEIGHT * qr_raw))} from Stage 1 QR verification)."
             ),
             "rules": rule_checks,
             "triggered_count": len(triggered),
@@ -320,7 +334,8 @@ class RiskEngine:
                 "Each rule encodes one documented mule or phishing typology. Rules are deterministic and independently "
                 "auditable: every one states the observed value, the threshold it was compared against, and the fixed "
                 "penalty it contributes. The raw sum is capped at 100 before weighting, so no single rule can dominate "
-                "the ensemble by itself."
+                "the ensemble by itself. R7 is fed directly by Stage 1; the remaining rules read the telemetry resolved "
+                "by the signal pipeline (ledger record, graph topology, or neutral when unobserved)."
             ),
         }
 
@@ -389,6 +404,7 @@ class RiskEngine:
             "standard": "Scikit-Learn supervised ensemble",
             "status": "FAIL" if ml_score >= 70 else ("WARN" if ml_score >= 40 else "PASS"),
             "score_impact": int(round(ML_WEIGHT * ml_score)),
+            "points": int(round(ML_WEIGHT * ml_score)),
             "weight_pct": int(ML_WEIGHT * 100),
             "summary": (
                 f"The forest assigns a {ml_probability * 100:.1f}% fraud probability to this transaction - "
@@ -422,19 +438,37 @@ class RiskEngine:
                 cycles = [c for c in clusters.get("circular_chains", []) if node_id in c.get("nodes", [])]
             except Exception:
                 cycles = []
-        graph_score = int(np.clip(in_deg * 2 + drain * 50 + (20 if graph_info.get("is_hub_mule") else 0)
-                                  + (20 if cycles else 0), 0, 100))
+        drain_component = float(np.clip(drain * 75.0, 0, 60))
+        hub_component = 25.0 if graph_info.get("is_hub_mule") else 0.0
+        cycle_component = 20.0 if cycles else 0.0
+        concentration_component = float(np.clip((in_deg / avg_degree) * 5.0, 0, 15)) if avg_degree else 0.0
+        graph_score = int(np.clip(drain_component + hub_component + cycle_component + concentration_component, 0, 100))
+
         stage4 = {
             "id": 4,
             "key": "network_topology",
             "title": "Money-Mule Network Topology",
             "standard": "NetworkX directed-flow analysis",
             "status": "FAIL" if graph_score >= 70 else ("WARN" if graph_score >= 40 else ("PASS" if graph_info.get("observed") else "SKIPPED")),
-            "score_impact": int(round(graph_score * 0.15)),
-            "weight_pct": 15,
+            "score_impact": 0,
+            "points": 0,
+            "weight_pct": 0,
+            "bucket": "evidence_only",
+            "risk_index": graph_score,
+            "risk_index_components": [
+                {"component": "Rapid drain (inflow that leaves again)", "points": round(drain_component, 1), "max": 60,
+                 "formula": "min(60, drain_ratio x 75)"},
+                {"component": "Cluster-confirmed hub mule", "points": hub_component, "max": 25,
+                 "formula": "25 if the hub detector flagged this node"},
+                {"component": "Membership in a wash-trading ring", "points": cycle_component, "max": 20,
+                 "formula": "20 if the node appears in a 3-6 node cycle"},
+                {"component": "Counterparty concentration vs network", "points": round(concentration_component, 1), "max": 15,
+                 "formula": "min(15, in_degree / avg_degree x 5)"},
+            ],
+            "note": "Topology is corroborating evidence: it feeds Rules R1/R3 and is never added to the fused score a second time.",
             "summary": (
-                f"Payee node has {in_deg} inbound / {out_deg} outbound edges, drains {drain * 100:.0f}% of inflow, "
-                f"role {graph_info.get('role', 'UNOBSERVED')}."
+                f"Payee node has {in_deg} inbound / {out_deg} outbound edges and drains {drain * 100:.0f}% of inflow "
+                f"(role {graph_info.get('role', 'UNOBSERVED')}); topology risk index {graph_score}/100."
             ),
             "observed": bool(graph_info.get("observed")),
             "metrics": {
@@ -477,7 +511,9 @@ class RiskEngine:
             "standard": "Score fusion with calibrated bands",
             "status": "FAIL" if risk_level == "CRITICAL" else ("WARN" if risk_level == "WARNING" else "PASS"),
             "score_impact": final_score,
+            "points": final_score,
             "weight_pct": 100,
+            "bucket": "fusion",
             "summary": (
                 f"{RULE_WEIGHT:.0%} of the rule bucket + {ML_WEIGHT:.0%} of the model bucket = {final_score}/100, "
                 f"which is the {percentile}th percentile of all {snapshot.get('sample_size', 0)} evaluated transactions."
@@ -511,7 +547,7 @@ class RiskEngine:
             {"dimension": "ML model", "score": ml_score,
              "formula": "Random Forest fraud probability x 100"},
             {"dimension": "Network topology", "score": int(graph_score),
-             "formula": "in_degree x 2 + drain x 50 + hub/ring bonuses"},
+             "formula": "drain x 75 (max 60) + hub 25 + wash-ring 20 + concentration 15"},
             {"dimension": "Velocity", "score": int(np.clip(velocity * 6, 0, 100)),
              "formula": "min(100, payments_in_10min x 6)"},
             {"dimension": "Identity age", "score": int(np.clip((10 - min(age, 10)) * 10, 0, 100)),
@@ -542,13 +578,20 @@ class RiskEngine:
             benchmarks.append(entry)
 
         # ---- contributions ------------------------------------------------------
+        raw_sum = sum(c["penalty"] for c in rule_checks) or 1
+        scale = rule_penalty / raw_sum
         contributions_bar = [
-            {"name": c["title"], "value": int(round(RULE_WEIGHT * c["penalty"])), "bucket": "Rule"}
+            {"name": c["title"], "value": int(round(RULE_WEIGHT * c["penalty"] * scale)), "bucket": "Rule engine (45%)"}
             for c in rule_checks if c["triggered"]
         ]
-        contributions_bar.append({"name": "Random Forest model", "value": int(round(ML_WEIGHT * ml_score)), "bucket": "Model"})
-        if not contributions_bar:
-            contributions_bar.append({"name": "No signal above threshold", "value": final_score, "bucket": "Baseline"})
+        contributions_bar.append(
+            {"name": "Random Forest model", "value": int(round(ML_WEIGHT * ml_score)), "bucket": "Model (55%)"}
+        )
+
+        stage_contributions = [
+            {"stage": st["id"], "label": st["title"], "points": int(st.get("points", 0)), "status": st["status"]}
+            for st in (stage1, stage2, stage3, stage4)
+        ]
 
         return {
             "summary": (
@@ -558,6 +601,15 @@ class RiskEngine:
             ),
             "stages": [stage1, stage2, stage3, stage4, stage5],
             "contributions": contributions_bar,
+            "stage_contributions": stage_contributions,
+            "evidence": {
+                "telemetry_source": signals.get("telemetry_source", "unknown"),
+                "cross_checks": signals.get("cross_checks", {}),
+                "qr_penalty": qr_penalty,
+                "rule_penalty": rule_penalty,
+                "ml_score": ml_score,
+                "graph_risk_index": graph_score,
+            },
             "radar": radar,
             "benchmarks": benchmarks,
             "model_validation": validation,
@@ -590,7 +642,7 @@ class RiskEngine:
                 "WARNING": "The UPI payload is structurally genuine but unsigned, so nobody can prove the sticker on the counter was not swapped.",
                 "PHISHING_MALICIOUS": "The scanned code is not a legitimate UPI instruction at all - it is an off-network phishing redirect or a spoofed payee tuple.",
                 "SKIPPED": "You entered the UPI ID directly, so no cryptographic QR evidence was available for this evaluation.",
-            }.get(qr_stage["status"], "")
+            }.get(qr_stage.get("trust_status", "SKIPPED"), "")
         )
 
         if triggered:
@@ -600,27 +652,90 @@ class RiskEngine:
                 f"{triggered[0]['observed'].lower()}."
             )
         else:
-            parts.append("No behavioural rule fired - velocity, drain ratio, account age and endpoint telemetry all sit inside normal ranges.")
+            parts.append(
+                "No behavioural rule fired - velocity, drain ratio, account age and endpoint telemetry all sit inside normal ranges."
+            )
+
+        if graph_stage["observed"]:
+            parts.append(
+                "The Random Forest assigns "
+                f"{ml_probability * 100:.1f}% fraud probability, and in the money-flow graph this payee behaves as "
+                f"{graph_stage['metrics']['role'].replace('_', ' ').lower()} "
+                f"(draining {graph_stage['metrics']['drain_ratio'] * 100:.0f}% of what it receives)."
+            )
+        else:
+            parts.append(
+                f"The Random Forest assigns {ml_probability * 100:.1f}% fraud probability, and the payee is not yet "
+                "present in the money-flow graph, so no topology evidence exists for it."
+            )
 
         parts.append(
-            f"The Random Forest assigns {ml_probability * 100:.1f}% fraud probability, and the payee node is "
-            f"{'observed in the mule graph as ' + graph_stage['metrics']['role'].replace('_', ' ').lower() if graph_stage['observed'] else 'not yet present in the mule graph'}"
+            f"Combined score {score}/100 ({level.replace('_', ' ').title()}) places it above "
+            f"{pop.get('percentile', 0)}% of the {pop.get('sample_size', 0)} transactions evaluated so far."
         )
+        return " ".join(parts)
+
+    # -------------------------------------------------------- local narrative
+    @staticmethod
+    def local_narrative(payload: Dict[str, Any]) -> str:
+        """Deterministic, offline explainability - no external model required."""
+        score = int(payload.get("risk_score", 0) or 0)
+        level = str(payload.get("risk_level", "LOW_RISK")).replace("_", " ").title()
+        qr_status = str(payload.get("qr_status") or "SKIPPED")
+        ml_probability = float(payload.get("ml_probability") or 0.0)
+        percentile = payload.get("percentile", 0) or 0
+
+        parts = []
+        if qr_status == "VERIFIED":
+            parts.append(
+                "The scanned QR carried a valid BIS HMAC-SHA256 signature and matched the storefront nameplate, "
+                "so the payload itself is authentic."
+            )
+        elif qr_status == "PHISHING_MALICIOUS":
+            parts.append(
+                "The scanned code is not a genuine UPI instruction - it redirects payment to a spoofed or off-network "
+                "beneficiary, so you must not pay."
+            )
+        elif qr_status == "WARNING":
+            parts.append(
+                "The QR payload parses as a UPI instruction but is unsigned, so tampering after printing cannot be ruled out."
+            )
+        else:
+            parts.append(
+                "You entered the UPI ID directly, so no cryptographic QR evidence was available for this evaluation."
+            )
+
+        triggered = payload.get("triggered_rules") or ""
+        if isinstance(triggered, (list, tuple)):
+            rules = [str(r).strip() for r in triggered if str(r).strip()]
+        else:
+            rules = [r.strip() for r in str(triggered).split(",") if r.strip()]
+        if rules:
+            parts.append(
+                f"{len(rules)} behavioural rule(s) fired ({', '.join(rules)}), which is what drove the risk to "
+                f"{score}/100 ({level})."
+            )
+        else:
+            parts.append(
+                "No behavioural or network rule fired - velocity, drain ratio and account age all sit inside the "
+                "normal population ranges."
+            )
 
         parts.append(
-            f"Combined score {score}/100 ({level.replace('_', ' ').title()}), above {pop.get('percentile', 0)}% of the "
-            f"{pop.get('sample_size', 0)} transactions evaluated so far."
+            f"The Random Forest assigns {ml_probability * 100:.1f}% fraud probability, so the combined verdict is "
+            f"{score}/100 ({level}), above {percentile}% of the payments evaluated so far."
         )
         return " ".join(parts)
 
     # ---------------------------------------------------------------- GenAI path
     async def generate_ai_explanation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Non-blocking GenAI narrative. Called from /api/ai-explain so that the
-        payment verdict itself is never delayed by a model round-trip.
+        Explainability narrative. The deterministic local narrative is always
+        available; a GenAI round-trip is only attempted when OPENROUTER_API_KEY
+        is configured in the environment, so the platform works fully offline.
         """
         if not OPENROUTER_API_KEY:
-            return {"text": None, "source": "unavailable", "error": "No API key configured."}
+            return {"text": self.local_narrative(payload), "source": "local_deterministic", "model": None}
 
         prompt = (
             "You are the explainability copilot of Diamond-Protect, an Indian UPI fraud-defense platform aligned to "

@@ -1,156 +1,164 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  ShieldCheck, 
-  Smartphone, 
-  QrCode, 
-  Network, 
-  BarChart3, 
-  Lock, 
-  LogOut, 
-  Cpu,
-  Layers,
-  Sparkles
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ShieldCheck,
+  Smartphone,
+  QrCode,
+  Network,
+  BarChart3,
+  Database,
+  LogOut,
+  Activity
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
 
 import SpatialCanvas from './components/SpatialCanvas';
-import UserPaymentSimulator from './components/UserPaymentSimulator';
+import VerifyPage from './pages/VerifyPage';
+import LoginPage from './pages/LoginPage';
 import MerchantQRStudio from './components/MerchantQRStudio';
 import MuleNetworkGraph from './components/MuleNetworkGraph';
 import InvestigatorDashboard from './components/InvestigatorDashboard';
-import AuthModal from './components/AuthModal';
+import DatasetUploader from './components/DatasetUploader';
+
+import { api, clearSession, getUser, hasSession, onUnauthorized } from './lib/api';
+import { DEFAULT_ROUTE, ROUTES, navigate, useRoute } from './lib/router';
+
+const NAV_ITEMS = [
+  { id: 'verify', label: 'Verify Payment', icon: Smartphone, desc: 'Camera & UPI analysis' },
+  { id: 'qr-studio', label: 'Merchant QR Studio', icon: QrCode, desc: 'Sign & verify payloads' },
+  { id: 'graph', label: 'Mule Network', icon: Network, desc: 'Topology & wash rings' },
+  { id: 'dashboard', label: 'Investigator Dashboard', icon: BarChart3, desc: 'Statistics & ledger' },
+  { id: 'data', label: 'Dataset', icon: Database, desc: 'CSV ingestion' }
+];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('simulator');
+  const route = useRoute();
+  const [user, setUser] = useState(() => (hasSession() ? getUser() : null));
   const [stats, setStats] = useState(null);
-  
-  // Auth state
-  const [currentUser, setCurrentUser] = useState(null);
-  const [isAuthOpen, setIsAuthOpen] = useState(false);
 
-  useEffect(() => {
-    fetchStats();
-    checkExistingAuth();
+  const handleUnauthorized = useCallback(() => {
+    setUser(null);
+    navigate('login');
   }, []);
 
-  const checkExistingAuth = () => {
-    const savedUser = localStorage.getItem('diamond_user');
-    const token = localStorage.getItem('diamond_auth_token');
-    if (savedUser && token) {
-      try {
-        setCurrentUser(JSON.parse(savedUser));
-      } catch (e) {
-        localStorage.removeItem('diamond_user');
-      }
+  useEffect(() => {
+    onUnauthorized(handleUnauthorized);
+    return () => onUnauthorized(null);
+  }, [handleUnauthorized]);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const data = await api('/api/stats');
+      setStats(data);
+    } catch (err) {
+      console.error('Error fetching stats:', err);
     }
+  }, []);
+
+  useEffect(() => {
+    if (user) fetchStats();
+  }, [user, fetchStats]);
+
+  const handleAuthSuccess = (nextUser) => {
+    setUser(nextUser);
+    navigate(DEFAULT_ROUTE);
+    fetchStats();
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('diamond_auth_token');
-    localStorage.removeItem('diamond_user');
-    setCurrentUser(null);
+    clearSession();
+    setUser(null);
+    setStats(null);
+    navigate('login');
   };
 
-  const fetchStats = async () => {
-    try {
-      const res = await fetch('/api/stats');
-      const data = await res.json();
-      setStats(data);
-    } catch (e) {
-      console.error('Error fetching stats:', e);
+  if (!user) {
+    return (
+      <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden">
+        <SpatialCanvas />
+        <LoginPage onAuthSuccess={handleAuthSuccess} />
+      </div>
+    );
+  }
+
+  const activeRoute = ROUTES.includes(route) ? route : DEFAULT_ROUTE;
+
+  const renderPage = () => {
+    switch (activeRoute) {
+      case 'qr-studio':
+        return <MerchantQRStudio />;
+      case 'graph':
+        return <MuleNetworkGraph />;
+      case 'dashboard':
+        return (
+          <InvestigatorDashboard stats={stats} refreshStats={fetchStats} />
+        );
+      case 'data':
+        return <DatasetUploader onImported={fetchStats} />;
+      case 'verify':
+      default:
+        return <VerifyPage onEvaluated={fetchStats} />;
     }
   };
 
-  const navItems = [
-    { id: 'simulator', label: 'Verify Payment & Scan QR', icon: Smartphone, desc: 'Camera & UPI Input' },
-    { id: 'qr_studio', label: 'Merchant QR Studio', icon: QrCode, desc: 'Anti-Tamper & Mint' },
-    { id: 'graph', label: 'Mule Syndicates Graph', icon: Network, desc: 'NetworkX Analysis' },
-    { id: 'investigator', label: 'Live Triage Hub', icon: BarChart3, desc: 'Audit Ledger' },
-  ];
-
   return (
     <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden">
-      {/* Dynamic 3D Spatial Canvas Background */}
       <SpatialCanvas />
 
-      {/* Top Navbar */}
-      <header className="sticky top-0 z-40 bg-[#0e1629]/80 backdrop-blur-xl border-b border-white/10 shadow-lg px-4 sm:px-6 lg:px-8">
+      {/* Top navbar */}
+      <header className="sticky top-0 z-40 bg-[#0e1629]/85 backdrop-blur-xl border-b border-white/10 shadow-lg px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto h-20 flex items-center justify-between gap-4">
-          {/* Logo & Identity */}
           <div className="flex items-center gap-3.5">
             <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-sky-400 via-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-sky-500/20 ring-1 ring-white/20">
               <ShieldCheck className="w-6 h-6 text-slate-950 font-bold" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xl font-black tracking-tight brand-gradient">
-                  Diamond-Protect
-                </span>
+                <span className="text-xl font-black tracking-tight brand-gradient">Diamond-Protect</span>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/40 text-sky-300">
-                  BIS Standard
+                  IS 18000
                 </span>
               </div>
               <p className="text-xs text-slate-400 font-medium">
-                Real-Time UPI Fraud, Camera QR & Mule-Account Detection
+                Real-Time UPI Fraud, Camera QR &amp; Mule-Account Detection
               </p>
             </div>
           </div>
 
-          {/* User Auth Portal & Standards Badges */}
           <div className="flex items-center gap-3">
-            <div className="hidden lg:flex items-center gap-2">
-              <span className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 font-mono flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                IS 18000 Certified
+            {stats && (
+              <span className="hidden lg:flex text-xs px-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 font-mono items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                {stats.total_transactions?.toLocaleString()} txns • {stats.fraud_rate_pct}% flagged
               </span>
-              <span className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 font-mono flex items-center gap-1.5">
-                <Cpu className="w-3.5 h-3.5 text-sky-400" />
-                Llama 3.2 AI
-              </span>
-            </div>
-
-            {/* User Account Button */}
-            {currentUser ? (
-              <div className="flex items-center gap-3 bg-slate-900/90 border border-white/10 px-3.5 py-1.5 rounded-2xl shadow">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold text-xs">
-                    {currentUser.full_name?.charAt(0) || 'U'}
-                  </div>
-                  <div className="text-left hidden sm:block">
-                    <div className="text-xs font-bold text-white leading-tight">{currentUser.full_name}</div>
-                    <div className="text-[10px] text-slate-400 font-mono leading-none">{currentUser.email}</div>
-                  </div>
-                </div>
-                <button
-                  onClick={handleLogout}
-                  title="Sign Out"
-                  className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setIsAuthOpen(true)}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-sky-400 to-indigo-500 hover:from-sky-300 hover:to-indigo-400 text-slate-950 shadow-md shadow-sky-500/20 cursor-pointer transition-all flex items-center gap-1.5 tracking-wide"
-              >
-                <Lock className="w-3.5 h-3.5" />
-                <span>Analyst Portal Sign In</span>
-              </button>
             )}
+
+            <div className="flex items-center gap-3 bg-slate-900/90 border border-white/10 px-3.5 py-1.5 rounded-2xl shadow">
+              <div className="w-7 h-7 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold text-xs uppercase">
+                {(user.username || '?').charAt(0)}
+              </div>
+              <div className="text-left hidden sm:block">
+                <div className="text-xs font-bold text-white leading-tight">{user.username}</div>
+                <div className="text-[10px] text-slate-400 font-mono leading-none">{user.role || 'analyst'}</div>
+              </div>
+              <button
+                onClick={handleLogout}
+                title="Sign out"
+                className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Feature Navigation Tabs */}
+        {/* Feature navigation */}
         <div className="max-w-7xl mx-auto flex space-x-2 overflow-x-auto py-2.5 border-t border-white/5">
-          {navItems.map((item) => {
+          {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id;
-
+            const isActive = activeRoute === item.id;
             return (
               <button
                 key={item.id}
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => navigate(item.id)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
                   isActive
                     ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/25 ring-1 ring-sky-300'
@@ -159,9 +167,11 @@ export default function App() {
               >
                 <Icon className="w-4 h-4" />
                 <span>{item.label}</span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-md font-mono ${
-                  isActive ? 'bg-slate-950/20 text-slate-950 font-bold' : 'bg-slate-900 text-slate-400'
-                }`}>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-md font-mono ${
+                    isActive ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-900 text-slate-400'
+                  }`}
+                >
                   {item.desc}
                 </span>
               </button>
@@ -170,59 +180,23 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Feature Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 relative z-10">
-        <AnimatePresence mode="wait">
-          {activeTab === 'simulator' && (
-            <UserPaymentSimulator
-              key="sim"
-              onTransactionEvaluated={() => fetchStats()}
-            />
-          )}
-
-          {activeTab === 'qr_studio' && (
-            <MerchantQRStudio key="qr" />
-          )}
-
-          {activeTab === 'graph' && (
-            <MuleNetworkGraph key="graph" />
-          )}
-
-          {activeTab === 'investigator' && (
-            <InvestigatorDashboard
-              key="inv"
-              stats={stats}
-              refreshStats={fetchStats}
-            />
-          )}
-        </AnimatePresence>
+        {renderPage()}
       </main>
 
-      {/* Auth Modal Dialog */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        onAuthSuccess={(user) => {
-          setCurrentUser(user);
-        }}
-      />
-
-      {/* Footer */}
       <footer className="border-t border-white/10 bg-[#0a0f1d] py-6 mt-12 relative z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-400">
           <div className="flex items-center gap-2">
             <span className="font-bold text-white">Diamond-Protect</span>
             <span>•</span>
-            <span>Spatial Real-Time UPI Fraud & Mule Defense System</span>
+            <span>Five-stage UPI fraud &amp; mule defence pipeline</span>
           </div>
-          <div className="flex items-center gap-3 text-slate-400 font-mono text-[11px]">
+          <div className="flex items-center gap-3 font-mono text-[11px]">
             <span>auth.db</span>
             <span>•</span>
             <span>transactions.db</span>
             <span>•</span>
-            <span>Camera QR Scanner</span>
-            <span>•</span>
-            <span>OpenRouter AI</span>
+            <span>username + password session</span>
           </div>
         </div>
       </footer>

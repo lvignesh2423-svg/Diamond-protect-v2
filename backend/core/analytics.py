@@ -34,6 +34,7 @@ BENCHMARK_FEATURES = [
     "outflow_ratio_5m",
     "in_degree_1h",
     "beneficiary_age_days",
+    "time_since_beneficiary_added_sec",
     "ip_risk_score",
 ]
 
@@ -77,6 +78,8 @@ class PopulationAnalytics:
         self._lock = threading.Lock()
         self._data: Dict[str, Any] = _empty_snapshot()
         self._scores: np.ndarray = np.array([])
+        self._sorted_values: Dict[str, np.ndarray] = {}
+        self._refreshing = False
         self._built_at: float = 0.0
 
     @property
@@ -90,12 +93,22 @@ class PopulationAnalytics:
         self._built_at = 0.0
 
     def snapshot(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Returns the cached statistics immediately whenever possible. A rebuild is
+        only performed inline when nothing has been computed yet; afterwards the
+        refresh runs on a background thread so request latency never absorbs it.
+        """
         now = time.time()
-        if not force and self._data.get("sample_size", 0) > 0 and (now - self._built_at) < TTL_SECONDS:
+        fresh = self._data.get("sample_size", 0) > 0 and (now - self._built_at) < TTL_SECONDS
+        if fresh and not force:
             return self._data
+
+        if self._data.get("sample_size", 0) > 0 and not force:
+            self._refresh_async()
+            return self._data
+
         with self._lock:
-            now = time.time()
-            if not force and self._data.get("sample_size", 0) > 0 and (now - self._built_at) < TTL_SECONDS:
+            if self._data.get("sample_size", 0) > 0 and not force:
                 return self._data
             try:
                 self._build()
@@ -103,6 +116,26 @@ class PopulationAnalytics:
                 print(f"[analytics] build failed: {exc}")
             self._built_at = time.time()
             return self._data
+
+    def _refresh_async(self) -> None:
+        if self._refreshing:
+            return
+        with self._lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+        thread = threading.Thread(target=self._refresh_worker, name="analytics-refresh", daemon=True)
+        thread.start()
+
+    def _refresh_worker(self) -> None:
+        try:
+            with self._lock:
+                self._build()
+                self._built_at = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[analytics] background refresh failed: {exc}")
+        finally:
+            self._refreshing = False
 
     # ------------------------------------------------------------------ build
     def _build(self):
@@ -147,12 +180,14 @@ class PopulationAnalytics:
 
         # --- feature benchmarks ---------------------------------------------------
         benchmarks = []
+        sorted_values: Dict[str, np.ndarray] = {}
         for feat in BENCHMARK_FEATURES:
             if feat not in df.columns:
                 continue
             series = pd.to_numeric(df[feat], errors="coerce").dropna().to_numpy(dtype=float)
             if series.size == 0:
                 continue
+            sorted_values[feat] = np.sort(series)
             hist_counts, hist_edges = np.histogram(series, bins=10)
             benchmarks.append({
                 "key": feat,
@@ -226,6 +261,7 @@ class PopulationAnalytics:
         ]
 
         self._scores = scores
+        self._sorted_values = sorted_values
         self._data = {
             "sample_size": int(n),
             "fraud_base_rate_pct": round(float(is_fraud.mean()) * 100, 2),
@@ -374,30 +410,14 @@ class PopulationAnalytics:
         return None
 
     def percentile_of_feature(self, feature: str, value: float) -> float:
-        snap = self.snapshot()
-        bench = None
-        for entry in snap.get("feature_benchmarks", []):
-            if entry["key"] == feature:
-                bench = entry
-                break
-        if bench is None:
+        """Exact percentile of a value inside the population (sorted-array search)."""
+        if feature not in self._sorted_values:
+            self.snapshot()
+        arr = self._sorted_values.get(feature)
+        if arr is None or arr.size == 0:
             return 0.0
-        # Approximate percentile by stacking the cached histogram.
-        hist = bench.get("histogram", [])
-        total = sum(h["count"] for h in hist)
-        if total == 0:
-            return 0.0
-        accumulated = 0
-        for h in hist:
-            lo, hi = h["bin"].split("-")
-            lo, hi = float(lo), float(hi)
-            if value < lo:
-                break
-            if value <= hi:
-                accumulated += h["count"] * ((value - lo) / (hi - lo) if hi > lo else 1.0)
-                break
-            accumulated += h["count"]
-        return round(min(100.0, (accumulated / total) * 100), 1)
+        below = int(np.searchsorted(arr, value, side="right"))
+        return round((below / arr.size) * 100, 1)
 
 
 _analytics: PopulationAnalytics | None = None

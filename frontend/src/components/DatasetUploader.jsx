@@ -5,14 +5,14 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Database, 
-  FileText, 
   Download,
   Info,
   RefreshCw
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { api } from '../lib/api';
 
-export default function DatasetUploader({ onUploadComplete }) {
+export default function DatasetUploader({ onImported, onUploadComplete }) {
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
@@ -40,28 +40,15 @@ export default function DatasetUploader({ onUploadComplete }) {
     const formData = new FormData();
     formData.append("file", file);
 
-    const token = localStorage.getItem('diamond_auth_token');
-    const headers = {};
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
     try {
-      const res = await fetch("/api/upload-csv", {
+      const data = await api("/api/upload-csv", {
         method: "POST",
-        headers,
         body: formData
       });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.detail || "Failed to process and ingest CSV.");
-      }
 
       setUploadStatus(data);
-      if (onUploadComplete) {
-        onUploadComplete(data);
-      }
+      if (onImported) onImported(data);
+      if (onUploadComplete) onUploadComplete(data);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -70,15 +57,14 @@ export default function DatasetUploader({ onUploadComplete }) {
   };
 
   const downloadSampleTemplate = () => {
-    const csvContent = "data:text/csv;charset=utf-8," + 
-      "txn_id,timestamp,sender_id,receiver_id,receiver_vpa,amount,qr_scanned,qr_hash_valid,qr_claimed_name,beneficiary_age_days,time_since_beneficiary_added_sec,velocity_10m,outflow_ratio_5m,in_degree_1h,ip_risk_score,device,location,is_fraud,fraud_type\n" +
-      "TXN_DEMO1,2026-10-12T10:30:00,USR_5001,MULE_HUB_9,fastclaim_88@ybl,18500.00,1,0,Electricity Refund Office,2,30,8,0.94,14,0.85,OnePlus 11,Mumbai,1,MULE_HUB_INFLOW\n" +
-      "TXN_DEMO2,2026-10-12T10:35:00,USR_5002,Kirana Store,kirana@sbi,320.00,1,1,Kirana Store,360,86400,1,0.05,2,0.04,Samsung S23,Bengaluru,0,NONE\n";
-    
+    const header =
+      "txn_id,timestamp,sender_id,receiver_id,receiver_vpa,amount,qr_scanned,qr_hash_valid,qr_claimed_name,beneficiary_age_days,time_since_beneficiary_added_sec,velocity_10m,outflow_ratio_5m,in_degree_1h,ip_risk_score,device,location,is_fraud,fraud_type";
+    const csvContent = "data:text/csv;charset=utf-8," + header;
+
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "diamond_protect_upi_template.csv");
+    link.setAttribute("download", "diamond_protect_upi_columns.csv");
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -111,7 +97,7 @@ export default function DatasetUploader({ onUploadComplete }) {
             className="px-5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-white/15 flex items-center gap-2 cursor-pointer transition-colors self-start md:self-auto"
           >
             <Download className="w-4 h-4 text-sky-400" />
-            <span>Download CSV Template</span>
+            <span>Download column headers</span>
           </button>
         </div>
       </div>
