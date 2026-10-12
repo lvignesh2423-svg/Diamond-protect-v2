@@ -5,28 +5,24 @@ import {
   QrCode, 
   Network, 
   BarChart3, 
-  Database,
-  Lock,
-  User,
-  LogOut,
-  Sparkles,
+  Lock, 
+  LogOut, 
   Cpu,
   Layers,
-  ArrowUpRight
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+import SpatialCanvas from './components/SpatialCanvas';
 import UserPaymentSimulator from './components/UserPaymentSimulator';
 import MerchantQRStudio from './components/MerchantQRStudio';
 import MuleNetworkGraph from './components/MuleNetworkGraph';
 import InvestigatorDashboard from './components/InvestigatorDashboard';
-import DatasetUploader from './components/DatasetUploader';
 import AuthModal from './components/AuthModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('simulator');
   const [stats, setStats] = useState(null);
-  const [presets, setPresets] = useState([]);
   
   // Auth state
   const [currentUser, setCurrentUser] = useState(null);
@@ -34,7 +30,6 @@ export default function App() {
 
   useEffect(() => {
     fetchStats();
-    fetchPresets();
     checkExistingAuth();
   }, []);
 
@@ -66,28 +61,20 @@ export default function App() {
     }
   };
 
-  const fetchPresets = async () => {
-    try {
-      const res = await fetch('/api/demo-presets');
-      const data = await res.json();
-      setPresets(data.presets || []);
-    } catch (e) {
-      console.error('Error fetching presets:', e);
-    }
-  };
-
   const navItems = [
-    { id: 'simulator', label: 'Payment Radar', icon: Smartphone, desc: 'Pre-Pay Interceptor' },
-    { id: 'qr_studio', label: 'QR Mint & Verifier', icon: QrCode, desc: 'BIS IS 18000' },
-    { id: 'graph', label: 'Mule Syndicates', icon: Network, desc: 'NetworkX Graph' },
-    { id: 'investigator', label: 'Live Triage', icon: BarChart3, desc: 'Database Ledger' },
-    { id: 'uploader', label: 'Upload Dataset', icon: Database, desc: 'Custom CSV Ingest' },
+    { id: 'simulator', label: 'Verify Payment & Scan QR', icon: Smartphone, desc: 'Camera & UPI Input' },
+    { id: 'qr_studio', label: 'Merchant QR Studio', icon: QrCode, desc: 'Anti-Tamper & Mint' },
+    { id: 'graph', label: 'Mule Syndicates Graph', icon: Network, desc: 'NetworkX Analysis' },
+    { id: 'investigator', label: 'Live Triage Hub', icon: BarChart3, desc: 'Audit Ledger' },
   ];
 
   return (
-    <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white">
+    <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden">
+      {/* Dynamic 3D Spatial Canvas Background */}
+      <SpatialCanvas />
+
       {/* Top Navbar */}
-      <header className="sticky top-0 z-40 bg-[#0e1629]/90 backdrop-blur-xl border-b border-white/10 shadow-lg px-4 sm:px-6 lg:px-8">
+      <header className="sticky top-0 z-40 bg-[#0e1629]/80 backdrop-blur-xl border-b border-white/10 shadow-lg px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto h-20 flex items-center justify-between gap-4">
           {/* Logo & Identity */}
           <div className="flex items-center gap-3.5">
@@ -96,15 +83,15 @@ export default function App() {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xl font-black tracking-tight text-white">
+                <span className="text-xl font-black tracking-tight brand-gradient">
                   Diamond-Protect
                 </span>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/40 text-sky-300">
-                  v3.0 Security
+                  BIS Standard
                 </span>
               </div>
               <p className="text-xs text-slate-400 font-medium">
-                Real-Time UPI Fraud & Mule-Account Defense System
+                Real-Time UPI Fraud, Camera QR & Mule-Account Detection
               </p>
             </div>
           </div>
@@ -113,8 +100,8 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="hidden lg:flex items-center gap-2">
               <span className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 font-mono flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                BIS IS 18000 Aligned
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                IS 18000 Certified
               </span>
               <span className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 font-mono flex items-center gap-1.5">
                 <Cpu className="w-3.5 h-3.5 text-sky-400" />
@@ -148,7 +135,7 @@ export default function App() {
                 className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-sky-400 to-indigo-500 hover:from-sky-300 hover:to-indigo-400 text-slate-950 shadow-md shadow-sky-500/20 cursor-pointer transition-all flex items-center gap-1.5 tracking-wide"
               >
                 <Lock className="w-3.5 h-3.5" />
-                <span>Analyst Sign In</span>
+                <span>Analyst Portal Sign In</span>
               </button>
             )}
           </div>
@@ -184,13 +171,12 @@ export default function App() {
       </header>
 
       {/* Main Feature Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 relative z-10">
         <AnimatePresence mode="wait">
           {activeTab === 'simulator' && (
             <UserPaymentSimulator
               key="sim"
               onTransactionEvaluated={() => fetchStats()}
-              presets={presets}
             />
           )}
 
@@ -209,16 +195,6 @@ export default function App() {
               refreshStats={fetchStats}
             />
           )}
-
-          {activeTab === 'uploader' && (
-            <DatasetUploader
-              key="uploader"
-              onUploadComplete={() => {
-                fetchStats();
-                setActiveTab('investigator');
-              }}
-            />
-          )}
         </AnimatePresence>
       </main>
 
@@ -232,19 +208,19 @@ export default function App() {
       />
 
       {/* Footer */}
-      <footer className="border-t border-white/10 bg-[#0a0f1d] py-6 mt-12">
+      <footer className="border-t border-white/10 bg-[#0a0f1d] py-6 mt-12 relative z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-400">
           <div className="flex items-center gap-2">
             <span className="font-bold text-white">Diamond-Protect</span>
             <span>•</span>
-            <span>Real-Time UPI Fraud, Phishing-QR and Mule Detection</span>
+            <span>Spatial Real-Time UPI Fraud & Mule Defense System</span>
           </div>
           <div className="flex items-center gap-3 text-slate-400 font-mono text-[11px]">
             <span>auth.db</span>
             <span>•</span>
             <span>transactions.db</span>
             <span>•</span>
-            <span>FastAPI</span>
+            <span>Camera QR Scanner</span>
             <span>•</span>
             <span>OpenRouter AI</span>
           </div>

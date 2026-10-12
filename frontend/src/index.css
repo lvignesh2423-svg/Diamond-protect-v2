@@ -2,17 +2,18 @@
 
 @layer base {
   body {
-    background-color: #0c1222;
+    background-color: #0d1527;
     background-image: 
-      radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.12) 0%, transparent 45%),
-      radial-gradient(circle at 85% 20%, rgba(99, 102, 241, 0.14) 0%, transparent 45%),
-      radial-gradient(circle at 50% 80%, rgba(168, 85, 247, 0.1) 0%, transparent 50%),
-      linear-gradient(180deg, #0e1629 0%, #0c1222 50%, #0a0f1d 100%);
+      radial-gradient(circle at 10% 15%, rgba(56, 189, 248, 0.16) 0%, transparent 45%),
+      radial-gradient(circle at 90% 20%, rgba(99, 102, 241, 0.18) 0%, transparent 45%),
+      radial-gradient(circle at 50% 85%, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
+      linear-gradient(180deg, #101a33 0%, #0d1527 50%, #0a1020 100%);
     background-attachment: fixed;
-    color: #e2e8f0;
+    color: #f1f5f9;
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     letter-spacing: -0.01em;
     min-height: 100vh;
+    overflow-x: hidden;
   }
 
   code, pre, .font-mono {
@@ -20,73 +21,54 @@
   }
 }
 
-/* Bright Glass Panels (Clean, Non-murky, Highly readable) */
-.spatial-card {
-  background: rgba(18, 27, 49, 0.75);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+/* Spatial Refractive Glass (Bright, High Depth, Crisp) */
+.spatial-glass {
+  background: rgba(19, 29, 53, 0.65);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   box-shadow: 
-    0 16px 36px -10px rgba(0, 0, 0, 0.4),
-    0 1px 0 0 rgba(255, 255, 255, 0.1) inset;
-  border-radius: 1.25rem;
+    0 20px 45px -12px rgba(0, 0, 0, 0.5),
+    0 1px 0 0 rgba(255, 255, 255, 0.15) inset;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.spatial-card:hover {
-  border-color: rgba(56, 189, 248, 0.35);
+.spatial-glass:hover {
+  border-color: rgba(56, 189, 248, 0.4);
   box-shadow: 
-    0 24px 48px -12px rgba(0, 0, 0, 0.5),
-    0 0 24px 0 rgba(56, 189, 248, 0.12),
-    0 1px 0 0 rgba(255, 255, 255, 0.15) inset;
+    0 28px 55px -15px rgba(0, 0, 0, 0.6),
+    0 0 25px 0 rgba(56, 189, 248, 0.15),
+    0 1px 0 0 rgba(255, 255, 255, 0.2) inset;
 }
 
-.spatial-card-danger {
-  background: rgba(45, 17, 27, 0.85);
-  backdrop-filter: blur(24px);
-  border: 1px solid rgba(244, 63, 94, 0.45);
+.spatial-glass-critical {
+  background: rgba(55, 18, 30, 0.75);
+  backdrop-filter: blur(28px);
+  border: 1px solid rgba(244, 63, 94, 0.5);
   box-shadow: 
-    0 16px 40px -10px rgba(244, 63, 94, 0.25),
-    0 0 20px 0 rgba(244, 63, 94, 0.15) inset;
+    0 20px 50px -10px rgba(244, 63, 94, 0.3),
+    0 0 30px 0 rgba(244, 63, 94, 0.2) inset;
 }
 
-.spatial-card-success {
-  background: rgba(13, 38, 29, 0.85);
-  backdrop-filter: blur(24px);
-  border: 1px solid rgba(16, 185, 129, 0.45);
+.spatial-glass-success {
+  background: rgba(14, 45, 33, 0.75);
+  backdrop-filter: blur(28px);
+  border: 1px solid rgba(16, 185, 129, 0.5);
   box-shadow: 
-    0 16px 40px -10px rgba(16, 185, 129, 0.25),
-    0 0 20px 0 rgba(16, 185, 129, 0.15) inset;
-}
-
-/* Clean Form Input Elements */
-.spatial-input {
-  background-color: rgba(13, 20, 36, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  color: #ffffff;
-  border-radius: 0.875rem;
-  padding: 0.65rem 1rem;
-  font-size: 0.875rem;
-  transition: all 0.2s ease;
-}
-
-.spatial-input:focus {
-  outline: none;
-  border-color: #38bdf8;
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+    0 20px 50px -10px rgba(16, 185, 129, 0.3),
+    0 0 30px 0 rgba(16, 185, 129, 0.2) inset;
 }
 
 /* Nav Dock */
 .spatial-dock {
-  background: rgba(16, 24, 44, 0.85);
-  backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(18, 27, 49, 0.85);
+  backdrop-filter: blur(28px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   box-shadow: 
-    0 16px 32px -8px rgba(0, 0, 0, 0.35),
-    0 0 16px 0 rgba(56, 189, 248, 0.1);
+    0 20px 40px -10px rgba(0, 0, 0, 0.45),
+    0 0 20px 0 rgba(56, 189, 248, 0.15);
 }
 
-/* Gradients */
 .brand-gradient {
   background: linear-gradient(135deg, #38BDF8 0%, #818CF8 50%, #C084FC 100%);
   -webkit-background-clip: text;
