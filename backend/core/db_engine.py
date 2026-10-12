@@ -1,7 +1,8 @@
+import json
 import os
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -57,6 +58,34 @@ def init_transactions_db():
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_txn_vpa ON transactions(receiver_vpa)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_txn_ts ON transactions(timestamp)")
+
+    # ---------------------------------------------------------- analyst history
+    # Every risk check an analyst runs is archived here, keyed by username, so
+    # the full staged analysis can be replayed later without re-running the model.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS evaluation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            txn_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            receiver_vpa TEXT,
+            amount REAL DEFAULT 0,
+            qr_claimed_name TEXT,
+            qr_scanned INTEGER DEFAULT 0,
+            risk_score INTEGER DEFAULT 0,
+            risk_level TEXT DEFAULT 'LOW_RISK',
+            ml_probability REAL DEFAULT 0,
+            rule_penalty REAL DEFAULT 0,
+            qr_status TEXT DEFAULT 'SKIPPED',
+            graph_role TEXT DEFAULT 'UNOBSERVED',
+            summary TEXT,
+            payload_json TEXT,
+            result_json TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hist_user ON evaluation_history(username, id DESC)"
+    )
     conn.commit()
     conn.close()
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   ShieldCheck,
   Smartphone,
@@ -10,16 +10,28 @@ import {
   Activity
 } from 'lucide-react';
 
-import SpatialCanvas from './components/SpatialCanvas';
-import VerifyPage from './pages/VerifyPage';
 import LoginPage from './pages/LoginPage';
-import MerchantQRStudio from './components/MerchantQRStudio';
-import MuleNetworkGraph from './components/MuleNetworkGraph';
-import InvestigatorDashboard from './components/InvestigatorDashboard';
-import DatasetUploader from './components/DatasetUploader';
-
 import { api, clearSession, getUser, hasSession, onUnauthorized } from './lib/api';
 import { DEFAULT_ROUTE, ROUTES, navigate, useRoute } from './lib/router';
+
+const SpatialCanvas = lazy(() => import('./components/SpatialCanvas'));
+const VerifyPage = lazy(() => import('./pages/VerifyPage'));
+const MerchantQRStudio = lazy(() => import('./components/MerchantQRStudio'));
+const MuleNetworkGraph = lazy(() => import('./components/MuleNetworkGraph'));
+const InvestigatorDashboard = lazy(() => import('./components/InvestigatorDashboard'));
+const DatasetUploader = lazy(() => import('./components/DatasetUploader'));
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center py-24">
+      <div className="flex flex-col items-center gap-3 text-slate-400 text-xs">
+        <div className="w-10 h-10 rounded-full border-4 border-sky-400/20 border-t-sky-400 animate-spin" />
+        <span>Loading module...</span>
+      </div>
+    </div>
+  );
+}
+
 
 const NAV_ITEMS = [
   { id: 'verify', label: 'Verify Payment', icon: Smartphone, desc: 'Camera & UPI analysis' },
@@ -73,7 +85,9 @@ export default function App() {
   if (!user) {
     return (
       <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden">
-        <SpatialCanvas />
+        <Suspense fallback={null}>
+          <SpatialCanvas />
+        </Suspense>
         <LoginPage onAuthSuccess={handleAuthSuccess} />
       </div>
     );
@@ -101,9 +115,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden">
-      <SpatialCanvas />
+      <Suspense fallback={null}>
+        <SpatialCanvas />
+      </Suspense>
 
-      {/* Top navbar */}
       <header className="sticky top-0 z-40 bg-[#0e1629]/85 backdrop-blur-xl border-b border-white/10 shadow-lg px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto h-20 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
@@ -181,7 +196,7 @@ export default function App() {
       </header>
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 relative z-10">
-        {renderPage()}
+        <Suspense fallback={<PageFallback />}>{renderPage()}</Suspense>
       </main>
 
       <footer className="border-t border-white/10 bg-[#0a0f1d] py-6 mt-12 relative z-10">
