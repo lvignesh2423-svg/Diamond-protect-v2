@@ -44,7 +44,7 @@ Explain this risk alert in 2 to 3 concise, clear sentences. Speak simply so any 
 
 Transaction Risk:
 - Risk Score: {risk_score}/100 ({risk_level})
-- Amount: ₹{txn_details.get('amount', 0):,.2f}
+- Amount: Rs. {txn_details.get('amount', 0):,.2f}
 - Payee VPA / Handle: {txn_details.get('receiver_vpa', 'Unknown')}
 - Claimed Merchant: {txn_details.get('qr_claimed_name', 'None')}
 - Reasons Triggered: {', '.join(reasons)}
@@ -57,7 +57,7 @@ Respond with:
 Keep it under 65 words.
 """
         try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 res = await client.post(
                     OPENROUTER_URL,
                     headers={
@@ -80,10 +80,11 @@ Keep it under 65 words.
                     data = res.json()
                     return data["choices"][0]["message"]["content"].strip()
                 else:
-                    return f"Offline Summary: {' '.join(reasons)}"
+                    print(f"OpenRouter non-200: {res.status_code} {res.text}")
+                    return f"Rule-based Alert: {' '.join(reasons)}"
         except Exception as e:
-            # Fallback if network issue
-            return f"Offline Summary: {' '.join(reasons)}"
+            print(f"OpenRouter API exception: {e}")
+            return f"Rule-based Alert: {' '.join(reasons)}"
 
     async def evaluate_transaction(self, txn: Dict[str, Any]) -> Dict[str, Any]:
         """
