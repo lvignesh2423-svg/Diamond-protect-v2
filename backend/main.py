@@ -8,7 +8,15 @@ from pydantic import BaseModel, Field
 
 from backend.core.analytics import get_analytics
 from backend.core.auth_engine import authenticate_user, create_access_token, create_user, verify_token
-from backend.core.db_engine import bulk_insert_from_csv, get_recent_transactions_list, insert_transaction
+from backend.core.db_engine import (
+    bulk_insert_from_csv,
+    clear_evaluation_history,
+    get_evaluation_history,
+    get_recent_transactions_list,
+    insert_evaluation_history,
+    insert_transaction,
+    list_evaluation_history,
+)
 from backend.core.graph_engine import MuleGraphEngine
 from backend.core.qr_engine import generate_signed_upi_payload, render_qr_base64, verify_upi_qr
 from backend.core.risk_engine import RiskEngine
@@ -217,7 +225,33 @@ async def evaluate_transaction_endpoint(
     )
     graph_engine.schedule_reload()
 
-    return {**result, "txn_id": txn_id, "evaluated_by": user.get("username")}
+    record = {**result, "txn_id": txn_id, "evaluated_by": user.get("username")}
+    # Archive the check so the analyst can reopen it from their history later.
+    insert_evaluation_history(txn_id, user.get("username", "analyst"), payload.model_dump(), record)
+    return record
+
+
+@app.get("/api/history")
+def get_history_endpoint(limit: int = 100, user: Dict[str, Any] = Depends(require_user)):
+    """Every risk check this signed-in analyst has already run."""
+    username = user.get("username", "analyst")
+    items = list_evaluation_history(username, limit=min(limit, 500))
+    return {"username": username, "count": len(items), "items": items}
+
+
+@app.get("/api/history/{txn_id}")
+def get_history_detail_endpoint(txn_id: str, user: Dict[str, Any] = Depends(require_user)):
+    record = get_evaluation_history(user.get("username", "analyst"), txn_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="No saved check with that transaction id.")
+    return record
+
+
+@app.delete("/api/history")
+def clear_history_endpoint(user: Dict[str, Any] = Depends(require_user)):
+    username = user.get("username", "analyst")
+    removed = clear_evaluation_history(username)
+    return {"success": True, "removed": removed, "username": username}
 
 
 @app.post("/api/ai-explain")

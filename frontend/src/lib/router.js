@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['verify', 'qr-studio', 'graph', 'dashboard', 'data'];
+export const ROUTES = ['verify', 'history', 'qr-studio', 'graph', 'dashboard'];
 export const DEFAULT_ROUTE = 'verify';
 
 export function currentRoute() {

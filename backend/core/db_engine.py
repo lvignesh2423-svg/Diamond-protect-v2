@@ -199,4 +199,110 @@ def get_recent_transactions_list(limit: int = 50, fraud_only: bool = False) -> L
     return [dict(r) for r in rows]
 
 
+# ------------------------------------------------------------------ analyst history
+def _stage_status(result: Dict[str, Any], stage_key: str) -> str:
+    for stage in (result.get("analysis") or {}).get("stages", []):
+        if stage.get("key") == stage_key:
+            return str(stage.get("status", "SKIPPED"))
+    return "SKIPPED"
+
+
+def _graph_role(result: Dict[str, Any]) -> str:
+    for stage in (result.get("analysis") or {}).get("stages", []):
+        if stage.get("key") == "network_topology":
+            metrics = stage.get("metrics") or {}
+            if metrics.get("role"):
+                return str(metrics["role"])
+            if stage.get("role"):
+                return str(stage.get("role"))
+            if stage.get("note"):
+                return str(stage.get("note"))
+    return "UNOBSERVED"
+
+
+def insert_evaluation_history(txn_id: str, username: str, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """Archive one risk check so an analyst can replay the exact staged analysis later."""
+    analysis = result.get("analysis") or {}
+    row = (
+        txn_id,
+        username or "analyst",
+        datetime.utcnow().isoformat(),
+        (payload.get("receiver_vpa") or "").strip(),
+        float(payload.get("amount") or 0.0),
+        (payload.get("qr_claimed_name") or "").strip(),
+        int(bool(payload.get("qr_scanned"))),
+        int(result.get("risk_score", 0)),
+        str(result.get("risk_level", "LOW_RISK")),
+        float(result.get("ml_probability") or 0.0),
+        float(result.get("rule_penalty") or 0.0),
+        _stage_status(result, "qr_integrity"),
+        _graph_role(result),
+        str(analysis.get("summary", "")),
+        json.dumps(payload, default=str),
+        json.dumps(result, default=str),
+    )
+    conn = get_tx_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO evaluation_history (
+            txn_id, username, created_at, receiver_vpa, amount, qr_claimed_name,
+            qr_scanned, risk_score, risk_level, ml_probability, rule_penalty,
+            qr_status, graph_role, summary, payload_json, result_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        row,
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_evaluation_history(username: str, limit: int = 100) -> List[Dict[str, Any]]:
+    conn = get_tx_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, txn_id, created_at, receiver_vpa, amount, qr_claimed_name,
+               qr_scanned, risk_score, risk_level, ml_probability, rule_penalty,
+               qr_status, graph_role, summary
+        FROM evaluation_history
+        WHERE username = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (username, int(limit)),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_evaluation_history(username: str, txn_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_tx_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM evaluation_history WHERE username = ? AND txn_id = ?",
+        (username, txn_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    record = dict(row)
+    record["payload"] = json.loads(record.pop("payload_json") or "{}")
+    record["result"] = json.loads(record.pop("result_json") or "{}")
+    return record
+
+
+def clear_evaluation_history(username: str) -> int:
+    conn = get_tx_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM evaluation_history WHERE username = ?", (username,))
+    count = int(cursor.fetchone()[0])
+    cursor.execute("DELETE FROM evaluation_history WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    return count
+
+
 init_transactions_db()

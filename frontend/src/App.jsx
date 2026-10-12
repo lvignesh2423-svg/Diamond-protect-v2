@@ -5,7 +5,7 @@ import {
   QrCode,
   Network,
   BarChart3,
-  Database,
+  History,
   LogOut,
   Activity
 } from 'lucide-react';
@@ -19,7 +19,7 @@ const VerifyPage = lazy(() => import('./pages/VerifyPage'));
 const MerchantQRStudio = lazy(() => import('./components/MerchantQRStudio'));
 const MuleNetworkGraph = lazy(() => import('./components/MuleNetworkGraph'));
 const InvestigatorDashboard = lazy(() => import('./components/InvestigatorDashboard'));
-const DatasetUploader = lazy(() => import('./components/DatasetUploader'));
+const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 
 function PageFallback() {
   return (
@@ -35,10 +35,10 @@ function PageFallback() {
 
 const NAV_ITEMS = [
   { id: 'verify', label: 'Verify Payment', icon: Smartphone, desc: 'Camera & UPI analysis' },
+  { id: 'history', label: 'My History', icon: History, desc: 'Checks you ran' },
   { id: 'qr-studio', label: 'Merchant QR Studio', icon: QrCode, desc: 'Sign & verify payloads' },
   { id: 'graph', label: 'Mule Network', icon: Network, desc: 'Topology & wash rings' },
-  { id: 'dashboard', label: 'Investigator Dashboard', icon: BarChart3, desc: 'Statistics & ledger' },
-  { id: 'data', label: 'Dataset', icon: Database, desc: 'CSV ingestion' }
+  { id: 'dashboard', label: 'Investigator Dashboard', icon: BarChart3, desc: 'Statistics & ledger' }
 ];
 
 export default function App() {
@@ -105,8 +105,8 @@ export default function App() {
         return (
           <InvestigatorDashboard stats={stats} refreshStats={fetchStats} />
         );
-      case 'data':
-        return <DatasetUploader onImported={fetchStats} />;
+      case 'history':
+        return <HistoryPage />;
       case 'verify':
       default:
         return <VerifyPage onEvaluated={fetchStats} />;
