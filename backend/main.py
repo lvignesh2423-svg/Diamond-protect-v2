@@ -1,22 +1,27 @@
 import os
 import json
+import uuid
 import pandas as pd
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend.core.risk_engine import RiskEngine
 from backend.core.qr_engine import generate_signed_upi_payload, verify_upi_qr, render_qr_base64
 from backend.core.graph_engine import MuleGraphEngine
+from backend.core.auth_engine import create_user, authenticate_user, create_access_token, verify_token
+from backend.core.db_engine import (
+    insert_transaction, bulk_insert_from_csv, 
+    get_all_transactions_df, get_recent_transactions_list
+)
 
 app = FastAPI(
     title="Diamond-Protect API",
-    description="Real-Time UPI Fraud, Phishing-QR and Mule-Account Detection Intelligence Platform",
-    version="2.0.0"
+    description="Real-Time UPI Fraud & Mule-Account Detection Platform with Dedicated Auth & Transaction DBs",
+    version="3.0.0"
 )
 
-# Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +33,15 @@ app.add_middleware(
 risk_engine = RiskEngine()
 graph_engine = MuleGraphEngine()
 
-CSV_PATH = "d:/Diamond-protect-v2/backend/data/transactions.csv"
+# Auth Models
+class RegisterRequest(BaseModel):
+    email: str
+    full_name: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 class TransactionPayload(BaseModel):
     sender_id: str = "USR_1042"
@@ -58,25 +71,118 @@ class QRVerifyRequest(BaseModel):
     raw_qr_content: str
     claimed_merchant_name: Optional[str] = ""
 
+# Authentication Dependency Helper
+def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split("Bearer ")[1].strip()
+    return verify_token(token)
+
 @app.get("/")
 def root():
     return {
         "platform": "Diamond-Protect",
         "tagline": "Real-Time UPI Fraud & Mule-Account Detection System",
         "status": "OPERATIONAL",
-        "compliance": "BIS Digital Payment & DSCI Fintech Security Aligned",
-        "version": "2.0.0"
+        "architecture": "Separated Auth Database (auth.db) & Transactions Database (transactions.db)",
+        "version": "3.0.0"
     }
 
+# --- AUTHENTICATION ENDPOINTS (Isolated in auth.db) ---
+
+@app.post("/api/auth/register")
+def register_endpoint(req: RegisterRequest):
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
+    try:
+        user = create_user(req.email, req.full_name, req.password)
+        token = create_access_token(user)
+        return {
+            "success": True,
+            "message": "Account created successfully.",
+            "token": token,
+            "user": user
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Registration failed: " + str(e))
+
+@app.post("/api/auth/login")
+def login_endpoint(req: LoginRequest):
+    user = authenticate_user(req.email, req.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = create_access_token(user)
+    return {
+        "success": True,
+        "message": "Authenticated successfully.",
+        "token": token,
+        "user": user
+    }
+
+@app.get("/api/auth/me")
+def get_me_endpoint(user: Optional[Dict[str, Any]] = Depends(get_current_user)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated or token expired.")
+    return {"user": user}
+
+# --- CORE EVALUATION & DATA ENDPOINTS (Isolated in transactions.db) ---
+
 @app.post("/api/evaluate")
-async def evaluate_transaction_endpoint(payload: TransactionPayload):
+async def evaluate_transaction_endpoint(payload: TransactionPayload, user: Optional[Dict[str, Any]] = Depends(get_current_user)):
     """Real-time scoring and AI explainability for an incoming UPI payment."""
-    result = await risk_engine.evaluate_transaction(payload.model_dump())
-    return result
+    res = await risk_engine.evaluate_transaction(payload.model_dump())
+    
+    # Persist evaluated transaction into isolated transactions database
+    txn_id = f"TXN_{uuid.uuid4().hex[:10].upper()}"
+    insert_transaction({
+        **payload.model_dump(),
+        "txn_id": txn_id,
+        "is_fraud": 1 if res["risk_score"] >= 70 else 0,
+        "fraud_type": "HIGH_RISK_INTERCEPT" if res["risk_score"] >= 70 else "NONE",
+    }, uploaded_by=user.get("email", "live_evaluator") if user else "guest_user")
+    
+    # Reload graph dynamically
+    graph_engine.reload_graph()
+    
+    return {
+        **res,
+        "txn_id": txn_id
+    }
+
+@app.post("/api/upload-csv")
+async def upload_csv_endpoint(file: UploadFile = File(...), user: Optional[Dict[str, Any]] = Depends(get_current_user)):
+    """Upload user-provided UPI transaction dataset to analyze in real time."""
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a valid .csv file.")
+    
+    temp_path = f"d:/Diamond-protect-v2/backend/data/temp_{uuid.uuid4().hex}.csv"
+    try:
+        content = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(content)
+            
+        uploader = user.get("email", "user_upload") if user else "user_upload"
+        imported_count = bulk_insert_from_csv(temp_path, uploaded_by=uploader)
+        
+        # Trigger reload of the graph engine
+        graph_engine.reload_graph()
+        
+        return {
+            "success": True,
+            "imported_count": imported_count,
+            "filename": file.filename,
+            "message": f"Successfully ingested and indexed {imported_count} transactions into isolated database."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process CSV: {str(e)}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 @app.post("/api/qr/generate")
 def generate_qr_endpoint(req: QRGenerateRequest):
-    """Generates a BIS-compliant cryptographically signed UPI QR code."""
     payload_info = generate_signed_upi_payload(
         merchant_id=req.merchant_id,
         merchant_name=req.merchant_name,
@@ -92,33 +198,28 @@ def generate_qr_endpoint(req: QRGenerateRequest):
 
 @app.post("/api/qr/verify")
 def verify_qr_endpoint(req: QRVerifyRequest):
-    """Inspects a scanned QR payload for tampering, malicious scheme, or merchant spoofing."""
     return verify_upi_qr(req.raw_qr_content, req.claimed_merchant_name)
 
 @app.get("/api/graph/mule-clusters")
 def get_mule_clusters():
-    """Returns detected hub mules and circular money-laundering rings."""
     return graph_engine.detect_mule_rings()
 
 @app.get("/api/graph/visualization")
 def get_graph_visualization(limit: int = 45):
-    """Returns network nodes and transaction edges for interactive graph UI."""
     return graph_engine.get_network_visualization_data(limit_nodes=limit)
 
 @app.get("/api/stats")
 def get_platform_stats():
-    """Returns system-wide metrics and analytics."""
-    if not os.path.exists(CSV_PATH):
-        return {"error": "Transactions not found"}
-        
-    df = pd.read_csv(CSV_PATH)
+    df = get_all_transactions_df()
     total_txns = len(df)
-    fraud_txns = int(df["is_fraud"].sum())
+    fraud_txns = int(df["is_fraud"].sum()) if total_txns > 0 else 0
     fraud_rate = round((fraud_txns / total_txns) * 100, 2) if total_txns > 0 else 0
-    total_volume = round(float(df["amount"].sum()), 2)
-    saved_fraud_volume = round(float(df[df["is_fraud"] == 1]["amount"].sum()), 2)
+    total_volume = round(float(df["amount"].sum()), 2) if total_txns > 0 else 0
+    saved_fraud_volume = round(float(df[df["is_fraud"] == 1]["amount"].sum()), 2) if total_txns > 0 else 0
     
-    fraud_by_type = df[df["is_fraud"] == 1]["fraud_type"].value_counts().to_dict()
+    fraud_by_type = {}
+    if total_txns > 0:
+        fraud_by_type = df[df["is_fraud"] == 1]["fraud_type"].value_counts().to_dict()
     
     return {
         "total_transactions": total_txns,
@@ -132,39 +233,26 @@ def get_platform_stats():
     }
 
 @app.get("/api/transactions/recent")
-def get_recent_transactions(limit: int = 20, fraud_only: bool = False):
-    """Fetches real-time or historical transaction stream for investigator view."""
-    if not os.path.exists(CSV_PATH):
-        return []
-    df = pd.read_csv(CSV_PATH)
-    if fraud_only:
-        df = df[df["is_fraud"] == 1]
-    df = df.tail(limit).iloc[::-1]
-    return df.to_dict(orient="records")
+def get_recent_transactions(limit: int = 25, fraud_only: bool = False):
+    return get_recent_transactions_list(limit=limit, fraud_only=fraud_only)
 
 @app.get("/api/demo-presets")
 def get_demo_presets():
-    """Provides instant preset test scenarios for judge demonstration."""
-    # 1. Normal safe merchant payment
     valid_qr_info = generate_signed_upi_payload(
         merchant_id="MID_CP_8812",
         merchant_name="Chai Point Indiranagar",
         vpa="chaipoint@icici",
         amount=180.0
     )
-    
-    # 2. Tampered / Spoofed QR sticker attack
     spoofed_qr = "upi://pay?pa=quickrefund_support_892@upi&pn=Sharma%20Kirana%20Support&mc=5411&am=1200.00&cu=INR"
-    
-    # 3. Phishing link masquerading as QR
     phishing_qr = "https://upi-free-cashback-reward2026.net/claim?code=DIAMOND"
 
     return {
         "presets": [
             {
                 "id": "scenario_normal",
-                "title": "🟢 Normal Safe Payment (Chai Point)",
-                "description": "Legitimate customer buying tea at a verified merchant with valid BIS signature.",
+                "title": "🟢 Safe Merchant Payment (Chai Point)",
+                "description": "Legitimate tea payment at verified merchant with authentic BIS digital signature.",
                 "data": {
                     "sender_id": "USR_1088",
                     "receiver_id": "Chai Point Indiranagar",
@@ -185,8 +273,8 @@ def get_demo_presets():
             },
             {
                 "id": "scenario_tampered_qr",
-                "title": "🔴 Tampered QR Sticker Attack (Merchant Spoofing)",
-                "description": "Scammer glued their fake QR over Sharma Kirana's counter. System detects payee and signature mismatch.",
+                "title": "🔴 Tampered QR Sticker Attack (Counterfeit)",
+                "description": "Scammer placed unauthorized sticker over Sharma Kirana counter to steal payments.",
                 "data": {
                     "sender_id": "USR_1014",
                     "receiver_id": "SCAMMER_QR_DIRECT",
@@ -207,8 +295,8 @@ def get_demo_presets():
             },
             {
                 "id": "scenario_mule_hub",
-                "title": "🔴 High-Velocity Money Mule Hub Inflow",
-                "description": "Victim sending money to a mule account receiving rapid payments from 14 senders & draining 95% in 2 mins.",
+                "title": "🔴 Money Mule Inflow (High Drain Velocity)",
+                "description": "Account receives multiple fast transfers and immediately drains 96% in 2 minutes.",
                 "data": {
                     "sender_id": "USR_1055",
                     "receiver_id": "MULE_ALPHA_HUB",
@@ -229,8 +317,8 @@ def get_demo_presets():
             },
             {
                 "id": "scenario_phishing_link",
-                "title": "🔴 Malicious Non-UPI Phishing QR",
-                "description": "Fake QR directs user to an external phishing website designed to steal banking credentials.",
+                "title": "🔴 Malicious Non-UPI Phishing Link",
+                "description": "Scam QR redirects user away from UPI to a malicious web page stealing bank credentials.",
                 "data": {
                     "sender_id": "USR_1090",
                     "receiver_id": "PHISHING_SITE",
