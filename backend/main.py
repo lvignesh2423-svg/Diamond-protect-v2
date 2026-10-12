@@ -1,25 +1,26 @@
 import os
-import json
 import uuid
-import pandas as pd
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from typing import Any, Dict, Optional
 
-from backend.core.risk_engine import RiskEngine
-from backend.core.qr_engine import generate_signed_upi_payload, verify_upi_qr, render_qr_base64
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from backend.core.analytics import get_analytics
+from backend.core.auth_engine import authenticate_user, create_access_token, create_user, verify_token
+from backend.core.db_engine import bulk_insert_from_csv, get_recent_transactions_list, insert_transaction
 from backend.core.graph_engine import MuleGraphEngine
-from backend.core.auth_engine import create_user, authenticate_user, create_access_token, verify_token
-from backend.core.db_engine import (
-    insert_transaction, bulk_insert_from_csv, 
-    get_all_transactions_df, get_recent_transactions_list
-)
+from backend.core.qr_engine import generate_signed_upi_payload, render_qr_base64, verify_upi_qr
+from backend.core.risk_engine import RiskEngine
+from backend.core.signals import derive_signals
 
 app = FastAPI(
     title="Diamond-Protect API",
-    description="Real-Time UPI Fraud & Mule-Account Detection Platform with Dedicated Auth & Transaction DBs",
-    version="3.0.0"
+    description=(
+        "Real-Time UPI Fraud & Mule-Account Detection Platform. "
+        "Username/password authentication is mandatory for every analytical endpoint."
+    ),
+    version="4.0.0",
 )
 
 app.add_middleware(
@@ -31,52 +32,91 @@ app.add_middleware(
 )
 
 risk_engine = RiskEngine()
-graph_engine = MuleGraphEngine()
+graph_engine = MuleGraphEngine(preload=False)
+analytics = get_analytics(risk_engine)
 
-# Auth Models
+
+@app.on_event("startup")
+def warm_up():
+    graph_engine.reload_graph()
+    analytics.snapshot(force=True)
+
+
+# ------------------------------------------------------------------ auth models
 class RegisterRequest(BaseModel):
-    email: str
-    full_name: str
-    password: str
+    username: str = Field(min_length=3, max_length=40)
+    password: str = Field(min_length=6, max_length=128)
+
 
 class LoginRequest(BaseModel):
-    email: str
+    username: str
     password: str
 
+
 class TransactionPayload(BaseModel):
-    sender_id: str = "USR_1042"
-    receiver_id: str = "MERCHANT_STORE"
-    receiver_vpa: str = "chaipoint@icici"
-    amount: float = 240.0
-    qr_scanned: bool = True
+    receiver_vpa: str = ""
+    account_number: Optional[str] = None
+    sender_id: Optional[str] = None
+    receiver_id: Optional[str] = None
+    amount: float = Field(ge=0)
+    qr_scanned: bool = False
     raw_qr: Optional[str] = ""
-    qr_claimed_name: Optional[str] = "Chai Point Indiranagar"
-    time_since_beneficiary_added_sec: int = 86400
-    beneficiary_age_days: int = 180
-    velocity_10m: int = 1
-    outflow_ratio_5m: float = 0.05
-    in_degree_1h: int = 2
-    ip_risk_score: float = 0.05
-    device: Optional[str] = "OnePlus 11 5G"
-    location: Optional[str] = "Bengaluru"
+    qr_claimed_name: Optional[str] = None
+
+
+class AIExplainRequest(BaseModel):
+    txn_id: Optional[str] = None
+    risk_score: int = 0
+    risk_level: str = "LOW_RISK"
+    amount: float = 0
+    receiver_vpa: str = ""
+    qr_claimed_name: str = ""
+    qr_status: str = "SKIPPED"
+    triggered_rules: str = ""
+    ml_probability: float = 0
+    graph_role: str = "UNOBSERVED"
+    percentile: float = 0
+
 
 class QRGenerateRequest(BaseModel):
-    merchant_id: str = "MID_IND_99210"
-    merchant_name: str = "Sharma Kirana & General Store"
-    vpa: str = "sharmakirana@sbi"
-    amount: Optional[float] = 450.0
-    mcc: str = "5411"
+    merchant_id: str = Field(min_length=1)
+    merchant_name: str = Field(min_length=1)
+    vpa: str = Field(min_length=3)
+    amount: Optional[float] = Field(default=None, ge=0)
+    mcc: str = "0000"
+
 
 class QRVerifyRequest(BaseModel):
     raw_qr_content: str
-    claimed_merchant_name: Optional[str] = ""
+    claimed_merchant_name: Optional[str] = None
 
-# Authentication Dependency Helper
-def get_current_user(authorization: Optional[str] = Header(None)):
+
+# --------------------------------------------------------------- auth plumbing
+def _bearer_token(authorization: Optional[str] = Header(None)) -> Optional[str]:
     if not authorization or not authorization.startswith("Bearer "):
         return None
-    token = authorization.split("Bearer ")[1].strip()
-    return verify_token(token)
+    return authorization.split("Bearer ", 1)[1].strip()
+
+
+def require_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Every analytical endpoint is behind this dependency."""
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    user = verify_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired or invalid. Please sign in again.")
+    return user
+
+
+def current_user_optional(authorization: Optional[str] = Header(None)) -> Optional[Dict[str, Any]]:
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ", 1)[1].strip()
+    return verify_token(token) if token else None
+
 
 @app.get("/")
 def root():
@@ -84,258 +124,209 @@ def root():
         "platform": "Diamond-Protect",
         "tagline": "Real-Time UPI Fraud & Mule-Account Detection System",
         "status": "OPERATIONAL",
-        "architecture": "Separated Auth Database (auth.db) & Transactions Database (transactions.db)",
-        "version": "3.0.0"
+        "auth": "username + password (mandatory for all analytical endpoints)",
+        "version": "4.0.0",
     }
 
-# --- AUTHENTICATION ENDPOINTS (Isolated in auth.db) ---
 
+# ----------------------------------------------------------------- auth routes
 @app.post("/api/auth/register")
 def register_endpoint(req: RegisterRequest):
+    username = req.username.strip()
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     try:
-        user = create_user(req.email, req.full_name, req.password)
+        user = create_user(username, req.password)
         token = create_access_token(user)
-        return {
-            "success": True,
-            "message": "Account created successfully.",
-            "token": token,
-            "user": user
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Registration failed: " + str(e))
+        return {"success": True, "message": "Account created.", "token": token, "user": user}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {exc}")
+
 
 @app.post("/api/auth/login")
 def login_endpoint(req: LoginRequest):
-    user = authenticate_user(req.email, req.password)
+    user = authenticate_user(req.username, req.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
     token = create_access_token(user)
-    return {
-        "success": True,
-        "message": "Authenticated successfully.",
-        "token": token,
-        "user": user
-    }
+    return {"success": True, "message": "Authenticated.", "token": token, "user": user}
+
 
 @app.get("/api/auth/me")
-def get_me_endpoint(user: Optional[Dict[str, Any]] = Depends(get_current_user)):
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated or token expired.")
+def get_me_endpoint(user: Dict[str, Any] = Depends(require_user)):
     return {"user": user}
 
-# --- CORE EVALUATION & DATA ENDPOINTS (Isolated in transactions.db) ---
 
+# ------------------------------------------------------------ payment analysis
 @app.post("/api/evaluate")
-async def evaluate_transaction_endpoint(payload: TransactionPayload, user: Optional[Dict[str, Any]] = Depends(get_current_user)):
-    """Real-time scoring and AI explainability for an incoming UPI payment."""
-    res = await risk_engine.evaluate_transaction(payload.model_dump())
-    
-    # Persist evaluated transaction into isolated transactions database
+async def evaluate_transaction_endpoint(
+    payload: TransactionPayload,
+    user: Dict[str, Any] = Depends(require_user),
+):
+    """
+    Synchronous, network-free risk evaluation:
+    QR verification + heuristic rules + Random Forest + graph topology + ensemble
+    fusion all resolve in milliseconds. The GenAI narrative is requested
+    separately via /api/ai-explain so it can never slow the verdict down.
+    """
+    receiver_vpa = (payload.receiver_vpa or "").strip()
+    if not receiver_vpa and not (payload.raw_qr or "").strip():
+        raise HTTPException(status_code=400, detail="A payee UPI ID or a scanned QR payload is required.")
+
+    signals = derive_signals(
+        receiver_vpa=receiver_vpa,
+        receiver_id=payload.receiver_id or payload.qr_claimed_name or receiver_vpa,
+        amount=payload.amount,
+        graph_engine=graph_engine,
+    )
+
+    txn = payload.model_dump()
+    txn["receiver_vpa"] = receiver_vpa
+    txn["receiver_id"] = signals["receiver_id"]
+    txn["sender_id"] = payload.sender_id or payload.account_number or "PAYER_SELF"
+    txn["qr_scanned"] = bool(payload.qr_scanned or payload.raw_qr)
+    txn["telemetry"] = signals["telemetry"]
+
+    result = risk_engine.evaluate(txn, signals, analytics=analytics, graph_engine=graph_engine)
+
     txn_id = f"TXN_{uuid.uuid4().hex[:10].upper()}"
-    insert_transaction({
-        **payload.model_dump(),
-        "txn_id": txn_id,
-        "is_fraud": 1 if res["risk_score"] >= 70 else 0,
-        "fraud_type": "HIGH_RISK_INTERCEPT" if res["risk_score"] >= 70 else "NONE",
-    }, uploaded_by=user.get("email", "live_evaluator") if user else "guest_user")
-    
-    # Reload graph dynamically
-    graph_engine.reload_graph()
-    
+    telemetry = signals["telemetry"]
+    insert_transaction(
+        {
+            "txn_id": txn_id,
+            "sender_id": txn["sender_id"],
+            "receiver_id": txn["receiver_id"],
+            "receiver_vpa": receiver_vpa,
+            "amount": payload.amount,
+            "qr_scanned": int(txn["qr_scanned"]),
+            "qr_hash_valid": int(bool(result["qr_verification"] and result["qr_verification"].get("is_valid"))),
+            "qr_claimed_name": payload.qr_claimed_name or "",
+            "beneficiary_age_days": telemetry["beneficiary_age_days"],
+            "time_since_beneficiary_added_sec": telemetry["time_since_beneficiary_added_sec"],
+            "velocity_10m": telemetry["velocity_10m"],
+            "outflow_ratio_5m": telemetry["outflow_ratio_5m"],
+            "in_degree_1h": telemetry["in_degree_1h"],
+            "ip_risk_score": telemetry["ip_risk_score"],
+            "is_fraud": 1 if result["risk_score"] >= 70 else 0,
+            "fraud_type": "HIGH_RISK_INTERCEPT" if result["risk_score"] >= 70 else "NONE",
+        },
+        uploaded_by=user.get("username", "analyst"),
+        source="live_evaluation",
+    )
+    graph_engine.schedule_reload()
+
+    return {**result, "txn_id": txn_id, "evaluated_by": user.get("username")}
+
+
+@app.post("/api/ai-explain")
+async def ai_explain_endpoint(req: AIExplainRequest, user: Dict[str, Any] = Depends(require_user)):
+    """Generative explainability - intentionally decoupled from the scoring path."""
+    result = await risk_engine.generate_ai_explanation(req.model_dump())
     return {
-        **res,
-        "txn_id": txn_id
+        "success": bool(result.get("text")),
+        "explanation": result.get("text"),
+        "source": result.get("source", "failed"),
+        "model": result.get("model"),
+        "error": result.get("error"),
     }
 
+
+# ----------------------------------------------------------------- data routes
 @app.post("/api/upload-csv")
-async def upload_csv_endpoint(file: UploadFile = File(...), user: Optional[Dict[str, Any]] = Depends(get_current_user)):
-    """Upload user-provided UPI transaction dataset to analyze in real time."""
-    if not file.filename.endswith(".csv"):
+async def upload_csv_endpoint(file: UploadFile = File(...), user: Dict[str, Any] = Depends(require_user)):
+    if not (file.filename or "").endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a valid .csv file.")
-    
+
     temp_path = f"d:/Diamond-protect-v2/backend/data/temp_{uuid.uuid4().hex}.csv"
     try:
         content = await file.read()
-        with open(temp_path, "wb") as f:
-            f.write(content)
-            
-        uploader = user.get("email", "user_upload") if user else "user_upload"
-        imported_count = bulk_insert_from_csv(temp_path, uploaded_by=uploader)
-        
-        # Trigger reload of the graph engine
+        with open(temp_path, "wb") as handle:
+            handle.write(content)
+
+        imported_count = bulk_insert_from_csv(temp_path, uploaded_by=user.get("username", "analyst"))
         graph_engine.reload_graph()
-        
+        analytics.snapshot(force=True)
+
         return {
             "success": True,
             "imported_count": imported_count,
             "filename": file.filename,
-            "message": f"Successfully ingested and indexed {imported_count} transactions into isolated database."
+            "message": f"Ingested {imported_count} transactions; graph topology and statistics recomputed.",
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process CSV: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process CSV: {exc}")
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
+
+@app.get("/api/transactions/recent")
+def get_recent_transactions(limit: int = 25, fraud_only: bool = False, user: Dict[str, Any] = Depends(require_user)):
+    return get_recent_transactions_list(limit=min(limit, 200), fraud_only=fraud_only)
+
+
+# -------------------------------------------------------------------- qr routes
 @app.post("/api/qr/generate")
-def generate_qr_endpoint(req: QRGenerateRequest):
+def generate_qr_endpoint(req: QRGenerateRequest, user: Dict[str, Any] = Depends(require_user)):
     payload_info = generate_signed_upi_payload(
         merchant_id=req.merchant_id,
         merchant_name=req.merchant_name,
         vpa=req.vpa,
         amount=req.amount,
-        mcc=req.mcc
+        mcc=req.mcc,
     )
-    b64_qr = render_qr_base64(payload_info["raw_uri"])
-    return {
-        **payload_info,
-        "qr_image_base64": b64_qr
-    }
+    return {**payload_info, "qr_image_base64": render_qr_base64(payload_info["raw_uri"])}
+
 
 @app.post("/api/qr/verify")
-def verify_qr_endpoint(req: QRVerifyRequest):
+def verify_qr_endpoint(req: QRVerifyRequest, user: Dict[str, Any] = Depends(require_user)):
     return verify_upi_qr(req.raw_qr_content, req.claimed_merchant_name)
 
+
+# ----------------------------------------------------------------- graph routes
 @app.get("/api/graph/mule-clusters")
-def get_mule_clusters():
-    return graph_engine.detect_mule_rings()
+def get_mule_clusters(user: Dict[str, Any] = Depends(require_user)):
+    data = graph_engine.detect_mule_rings()
+    return {**data, "build_ms": graph_engine.last_build_ms, "stale": graph_engine.is_stale}
+
 
 @app.get("/api/graph/visualization")
-def get_graph_visualization(limit: int = 45):
-    return graph_engine.get_network_visualization_data(limit_nodes=limit)
-
-@app.get("/api/stats")
-def get_platform_stats():
-    df = get_all_transactions_df()
-    total_txns = len(df)
-    fraud_txns = int(df["is_fraud"].sum()) if total_txns > 0 else 0
-    fraud_rate = round((fraud_txns / total_txns) * 100, 2) if total_txns > 0 else 0
-    total_volume = round(float(df["amount"].sum()), 2) if total_txns > 0 else 0
-    saved_fraud_volume = round(float(df[df["is_fraud"] == 1]["amount"].sum()), 2) if total_txns > 0 else 0
-    
-    fraud_by_type = {}
-    if total_txns > 0:
-        fraud_by_type = df[df["is_fraud"] == 1]["fraud_type"].value_counts().to_dict()
-    
+def get_graph_visualization(limit: int = 40, user: Dict[str, Any] = Depends(require_user)):
+    payload = graph_engine.get_network_visualization_data(limit_nodes=limit)
     return {
-        "total_transactions": total_txns,
-        "fraud_attempts_blocked": fraud_txns,
-        "fraud_rate_pct": fraud_rate,
-        "total_volume_inr": total_volume,
-        "fraud_amount_prevented_inr": saved_fraud_volume,
-        "fraud_breakdown": fraud_by_type,
-        "active_mule_nodes_tracked": 12,
-        "verified_merchants_registered": 84
+        **payload,
+        "build_ms": graph_engine.last_build_ms,
+        "stale": graph_engine.is_stale,
+        "degree_distribution": graph_engine.get_degree_distribution(),
     }
 
-@app.get("/api/transactions/recent")
-def get_recent_transactions(limit: int = 25, fraud_only: bool = False):
-    return get_recent_transactions_list(limit=limit, fraud_only=fraud_only)
 
-@app.get("/api/demo-presets")
-def get_demo_presets():
-    valid_qr_info = generate_signed_upi_payload(
-        merchant_id="MID_CP_8812",
-        merchant_name="Chai Point Indiranagar",
-        vpa="chaipoint@icici",
-        amount=180.0
-    )
-    spoofed_qr = "upi://pay?pa=quickrefund_support_892@upi&pn=Sharma%20Kirana%20Support&mc=5411&am=1200.00&cu=INR"
-    phishing_qr = "https://upi-free-cashback-reward2026.net/claim?code=DIAMOND"
+# ---------------------------------------------------------------- stats routes
+@app.get("/api/stats")
+def get_platform_stats(user: Dict[str, Any] = Depends(require_user)):
+    snapshot = analytics.snapshot()
+    breakdown = {item["key"]: item["count"] for item in snapshot.get("fraud_breakdown", [])}
+    clusters = graph_engine.detect_mule_rings()
 
     return {
-        "presets": [
-            {
-                "id": "scenario_normal",
-                "title": "🟢 Safe Merchant Payment (Chai Point)",
-                "description": "Legitimate tea payment at verified merchant with authentic BIS digital signature.",
-                "data": {
-                    "sender_id": "USR_1088",
-                    "receiver_id": "Chai Point Indiranagar",
-                    "receiver_vpa": "chaipoint@icici",
-                    "amount": 180.0,
-                    "qr_scanned": True,
-                    "raw_qr": valid_qr_info["raw_uri"],
-                    "qr_claimed_name": "Chai Point Indiranagar",
-                    "beneficiary_age_days": 320,
-                    "time_since_beneficiary_added_sec": 86400,
-                    "velocity_10m": 1,
-                    "outflow_ratio_5m": 0.05,
-                    "in_degree_1h": 2,
-                    "ip_risk_score": 0.04,
-                    "device": "Samsung Galaxy S23",
-                    "location": "Bengaluru"
-                }
-            },
-            {
-                "id": "scenario_tampered_qr",
-                "title": "🔴 Tampered QR Sticker Attack (Counterfeit)",
-                "description": "Scammer placed unauthorized sticker over Sharma Kirana counter to steal payments.",
-                "data": {
-                    "sender_id": "USR_1014",
-                    "receiver_id": "SCAMMER_QR_DIRECT",
-                    "receiver_vpa": "quickrefund_support_892@upi",
-                    "amount": 2500.0,
-                    "qr_scanned": True,
-                    "raw_qr": spoofed_qr,
-                    "qr_claimed_name": "Sharma Kirana Store",
-                    "beneficiary_age_days": 1,
-                    "time_since_beneficiary_added_sec": 15,
-                    "velocity_10m": 6,
-                    "outflow_ratio_5m": 0.88,
-                    "in_degree_1h": 8,
-                    "ip_risk_score": 0.85,
-                    "device": "OnePlus 11 5G",
-                    "location": "Delhi NCR"
-                }
-            },
-            {
-                "id": "scenario_mule_hub",
-                "title": "🔴 Money Mule Inflow (High Drain Velocity)",
-                "description": "Account receives multiple fast transfers and immediately drains 96% in 2 minutes.",
-                "data": {
-                    "sender_id": "USR_1055",
-                    "receiver_id": "MULE_ALPHA_HUB",
-                    "receiver_vpa": "fastcash_winner8899@ybl",
-                    "amount": 35000.0,
-                    "qr_scanned": False,
-                    "raw_qr": "",
-                    "qr_claimed_name": "Electricity Bill Refund Helpdesk",
-                    "beneficiary_age_days": 2,
-                    "time_since_beneficiary_added_sec": 45,
-                    "velocity_10m": 16,
-                    "outflow_ratio_5m": 0.96,
-                    "in_degree_1h": 22,
-                    "ip_risk_score": 0.92,
-                    "device": "iPhone 15 Pro",
-                    "location": "Mumbai"
-                }
-            },
-            {
-                "id": "scenario_phishing_link",
-                "title": "🔴 Malicious Non-UPI Phishing Link",
-                "description": "Scam QR redirects user away from UPI to a malicious web page stealing bank credentials.",
-                "data": {
-                    "sender_id": "USR_1090",
-                    "receiver_id": "PHISHING_SITE",
-                    "receiver_vpa": "cashback@unknown",
-                    "amount": 500.0,
-                    "qr_scanned": True,
-                    "raw_qr": phishing_qr,
-                    "qr_claimed_name": "Instant Cashback Bonus",
-                    "beneficiary_age_days": 1,
-                    "time_since_beneficiary_added_sec": 10,
-                    "velocity_10m": 4,
-                    "outflow_ratio_5m": 0.90,
-                    "in_degree_1h": 10,
-                    "ip_risk_score": 0.95,
-                    "device": "Realme 12 Pro+",
-                    "location": "Jaipur"
-                }
-            }
-        ]
+        "total_transactions": snapshot.get("sample_size", 0),
+        "fraud_attempts_blocked": snapshot.get("fraud_count", 0),
+        "fraud_rate_pct": snapshot.get("fraud_base_rate_pct", 0),
+        "total_volume_inr": snapshot.get("total_volume", 0),
+        "fraud_amount_prevented_inr": snapshot.get("fraud_volume", 0),
+        "fraud_breakdown": breakdown,
+        "active_mule_nodes_tracked": len(clusters.get("hub_mules", [])),
+        "verified_merchants_registered": snapshot.get("distinct_receivers", 0),
+        "graph": {
+            "nodes": clusters.get("total_nodes", 0),
+            "edges": clusters.get("total_edges", 0),
+            "build_ms": graph_engine.last_build_ms,
+            "cycle_search": clusters.get("cycle_search", {}),
+        },
+        "model": snapshot.get("model_metrics", {}),
+        "analytics": snapshot,
     }

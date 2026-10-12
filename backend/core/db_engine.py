@@ -1,16 +1,26 @@
-import sqlite3
 import os
-import pandas as pd
+import sqlite3
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
+
+import pandas as pd
 
 TRANSACTIONS_DB_PATH = "d:/Diamond-protect-v2/backend/data/transactions.db"
 
+CSV_COLUMNS = [
+    "txn_id", "timestamp", "sender_id", "receiver_id", "receiver_vpa", "amount",
+    "qr_scanned", "qr_hash_valid", "qr_claimed_name", "beneficiary_age_days",
+    "time_since_beneficiary_added_sec", "velocity_10m", "outflow_ratio_5m",
+    "in_degree_1h", "ip_risk_score", "device", "location", "is_fraud", "fraud_type"
+]
+
+
 def get_tx_connection():
     os.makedirs(os.path.dirname(TRANSACTIONS_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(TRANSACTIONS_DB_PATH)
+    conn = sqlite3.connect(TRANSACTIONS_DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_transactions_db():
     conn = get_tx_connection()
@@ -36,13 +46,22 @@ def init_transactions_db():
             location TEXT,
             is_fraud INTEGER DEFAULT 0,
             fraud_type TEXT DEFAULT 'NONE',
-            uploaded_by TEXT DEFAULT 'system'
+            uploaded_by TEXT DEFAULT 'system',
+            source TEXT DEFAULT 'dataset'
         )
     """)
+
+    existing = {row[1] for row in cursor.execute("PRAGMA table_info(transactions)")}
+    if "source" not in existing:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'dataset'")
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_txn_vpa ON transactions(receiver_vpa)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_txn_ts ON transactions(timestamp)")
     conn.commit()
     conn.close()
 
-def insert_transaction(txn: Dict[str, Any], uploaded_by: str = 'system'):
+
+def insert_transaction(txn: Dict[str, Any], uploaded_by: str = "system", source: str = "live_evaluation"):
     conn = get_tx_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -51,82 +70,84 @@ def insert_transaction(txn: Dict[str, Any], uploaded_by: str = 'system'):
             amount, qr_scanned, qr_hash_valid, qr_claimed_name,
             beneficiary_age_days, time_since_beneficiary_added_sec,
             velocity_10m, outflow_ratio_5m, in_degree_1h, ip_risk_score,
-            device, location, is_fraud, fraud_type, uploaded_by
-        ) VALUES (
-            ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?, ?
-        )
+            device, location, is_fraud, fraud_type, uploaded_by, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         txn.get("txn_id"),
-        txn.get("timestamp", datetime.utcnow().isoformat()),
-        txn.get("sender_id", "ANON_SENDER"),
-        txn.get("receiver_id", "ANON_RECEIVER"),
-        txn.get("receiver_vpa", ""),
+        txn.get("timestamp") or datetime.utcnow().isoformat(),
+        txn.get("sender_id") or "ANON_SENDER",
+        txn.get("receiver_id") or "ANON_RECEIVER",
+        txn.get("receiver_vpa") or "",
         float(txn.get("amount", 0.0)),
-        int(txn.get("qr_scanned", 0)),
+        int(bool(txn.get("qr_scanned", 0))),
         int(txn.get("qr_hash_valid", 1)),
-        txn.get("qr_claimed_name", ""),
+        txn.get("qr_claimed_name") or "",
         int(txn.get("beneficiary_age_days", 180)),
         int(txn.get("time_since_beneficiary_added_sec", 86400)),
-        int(txn.get("velocity_10m", 1)),
+        int(txn.get("velocity_10m", 0)),
         float(txn.get("outflow_ratio_5m", 0.0)),
-        int(txn.get("in_degree_1h", 1)),
+        int(txn.get("in_degree_1h", 0)),
         float(txn.get("ip_risk_score", 0.05)),
-        txn.get("device", "Mobile App"),
-        txn.get("location", "India"),
+        txn.get("device") or "",
+        txn.get("location") or "",
         int(txn.get("is_fraud", 0)),
-        txn.get("fraud_type", "NONE"),
-        uploaded_by
+        txn.get("fraud_type") or "NONE",
+        uploaded_by,
+        source
     ))
     conn.commit()
     conn.close()
 
-def bulk_insert_from_csv(csv_path: str, uploaded_by: str = 'user_upload') -> int:
+
+def _coerce_row(row: Dict[str, Any]) -> tuple:
+    return (
+        str(row.get("txn_id") or f"TXN_{abs(hash(str(row.get('receiver_vpa')))) % 10**10}"),
+        str(row.get("timestamp") or datetime.utcnow().isoformat()),
+        str(row.get("sender_id") or "USER"),
+        str(row.get("receiver_id") or "BENEFICIARY"),
+        str(row.get("receiver_vpa") or ""),
+        float(row.get("amount") or 0.0),
+        int(row.get("qr_scanned") or 0),
+        int(row.get("qr_hash_valid", 1) or 0),
+        str(row.get("qr_claimed_name") or ""),
+        int(row.get("beneficiary_age_days", 180) or 180),
+        int(row.get("time_since_beneficiary_added_sec", 86400) or 86400),
+        int(row.get("velocity_10m", 0) or 0),
+        float(row.get("outflow_ratio_5m", 0.0) or 0.0),
+        int(row.get("in_degree_1h", 0) or 0),
+        float(row.get("ip_risk_score", 0.05) or 0.05),
+        str(row.get("device") or ""),
+        str(row.get("location") or ""),
+        int(row.get("is_fraud") or 0),
+        str(row.get("fraud_type") or "NONE"),
+    )
+
+
+def bulk_insert_from_csv(csv_path: str, uploaded_by: str = "user_upload") -> int:
+    """Vectorised ingest: single executemany batch instead of per-row commits."""
     df = pd.read_csv(csv_path)
-    count = 0
+    df = df.where(pd.notnull(df), None)
+
+    records = df.to_dict(orient="records")
+    payload = [(*_coerce_row(r), uploaded_by, "csv_upload") for r in records]
+    if not payload:
+        return 0
+
     conn = get_tx_connection()
     cursor = conn.cursor()
-    
-    for _, row in df.iterrows():
-        txn_id = str(row.get("txn_id", f"TXN_{count}"))
-        cursor.execute("""
-            INSERT OR REPLACE INTO transactions (
-                txn_id, timestamp, sender_id, receiver_id, receiver_vpa,
-                amount, qr_scanned, qr_hash_valid, qr_claimed_name,
-                beneficiary_age_days, time_since_beneficiary_added_sec,
-                velocity_10m, outflow_ratio_5m, in_degree_1h, ip_risk_score,
-                device, location, is_fraud, fraud_type, uploaded_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            txn_id,
-            str(row.get("timestamp", datetime.utcnow().isoformat())),
-            str(row.get("sender_id", "USER")),
-            str(row.get("receiver_id", "BENEFICIARY")),
-            str(row.get("receiver_vpa", "")),
-            float(row.get("amount", 0.0)),
-            int(row.get("qr_scanned", 0)),
-            int(row.get("qr_hash_valid", 1)),
-            str(row.get("qr_claimed_name", "")),
-            int(row.get("beneficiary_age_days", 180)),
-            int(row.get("time_since_beneficiary_added_sec", 86400)),
-            int(row.get("velocity_10m", 1)),
-            float(row.get("outflow_ratio_5m", 0.0)),
-            int(row.get("in_degree_1h", 1)),
-            float(row.get("ip_risk_score", 0.05)),
-            str(row.get("device", "Android")),
-            str(row.get("location", "India")),
-            int(row.get("is_fraud", 0)),
-            str(row.get("fraud_type", "NONE")),
-            uploaded_by
-        ))
-        count += 1
-
+    cursor.executemany("""
+        INSERT OR REPLACE INTO transactions (
+            txn_id, timestamp, sender_id, receiver_id, receiver_vpa,
+            amount, qr_scanned, qr_hash_valid, qr_claimed_name,
+            beneficiary_age_days, time_since_beneficiary_added_sec,
+            velocity_10m, outflow_ratio_5m, in_degree_1h, ip_risk_score,
+            device, location, is_fraud, fraud_type, uploaded_by, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, payload)
     conn.commit()
     conn.close()
-    return count
+    return len(payload)
+
 
 def get_all_transactions_df() -> pd.DataFrame:
     conn = get_tx_connection()
@@ -134,18 +155,19 @@ def get_all_transactions_df() -> pd.DataFrame:
     conn.close()
     return df
 
+
 def get_recent_transactions_list(limit: int = 50, fraud_only: bool = False) -> List[Dict[str, Any]]:
     conn = get_tx_connection()
     cursor = conn.cursor()
     query = "SELECT * FROM transactions"
+    params: tuple = ()
     if fraud_only:
         query += " WHERE is_fraud = 1"
-    query += f" ORDER BY timestamp DESC LIMIT {limit}"
-    
-    cursor.execute(query)
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    cursor.execute(query, (*params, int(limit)))
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-# Initialize schema
+
 init_transactions_db()
