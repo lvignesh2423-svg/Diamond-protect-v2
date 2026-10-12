@@ -22,8 +22,7 @@ def init_auth_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            full_name TEXT NOT NULL,
+            username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
             role TEXT DEFAULT 'analyst',
@@ -36,7 +35,6 @@ def init_auth_db():
 def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
     if not salt:
         salt = secrets.token_hex(16)
-    # Salted PBKDF2 HMAC SHA-256 (high security standard)
     pwd_hash = hashlib.pbkdf2_hmac(
         'sha256',
         password.encode('utf-8'),
@@ -45,21 +43,26 @@ def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
     ).hex()
     return pwd_hash, salt
 
-def create_user(email: str, full_name: str, password: str, role: str = 'analyst') -> Dict[str, Any]:
+def create_user(username: str, password: str, role: str = 'analyst') -> Dict[str, Any]:
+    username_clean = username.strip().lower()
+    if not username_clean:
+        raise ValueError("Username cannot be empty.")
+    if len(password) < 4:
+        raise ValueError("Password must be at least 4 characters long.")
+
     conn = get_auth_connection()
     cursor = conn.cursor()
     
-    # Check if user already exists
-    cursor.execute("SELECT id FROM users WHERE email = ?", (email.lower().strip(),))
+    cursor.execute("SELECT id FROM users WHERE username = ?", (username_clean,))
     if cursor.fetchone():
         conn.close()
-        raise ValueError("An account with this email address already exists.")
+        raise ValueError("This username is already taken. Please choose another.")
     
     pwd_hash, salt = hash_password(password)
     cursor.execute("""
-        INSERT INTO users (email, full_name, password_hash, salt, role)
-        VALUES (?, ?, ?, ?, ?)
-    """, (email.lower().strip(), full_name.strip(), pwd_hash, salt, role))
+        INSERT INTO users (username, password_hash, salt, role)
+        VALUES (?, ?, ?, ?)
+    """, (username_clean, pwd_hash, salt, role))
     
     user_id = cursor.lastrowid
     conn.commit()
@@ -67,15 +70,15 @@ def create_user(email: str, full_name: str, password: str, role: str = 'analyst'
     
     return {
         "id": user_id,
-        "email": email.lower().strip(),
-        "full_name": full_name.strip(),
+        "username": username_clean,
         "role": role
     }
 
-def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
+def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    username_clean = username.strip().lower()
     conn = get_auth_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE email = ?", (email.lower().strip(),))
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username_clean,))
     user = cursor.fetchone()
     conn.close()
 
@@ -86,17 +89,15 @@ def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
     if secrets.compare_digest(expected_hash, user["password_hash"]):
         return {
             "id": user["id"],
-            "email": user["email"],
-            "full_name": user["full_name"],
+            "username": user["username"],
             "role": user["role"]
         }
     return None
 
-def create_access_token(user_data: Dict[str, Any], expires_hours: int = 24) -> str:
+def create_access_token(user_data: Dict[str, Any], expires_hours: int = 48) -> str:
     payload = {
         "sub": str(user_data["id"]),
-        "email": user_data["email"],
-        "name": user_data["full_name"],
+        "username": user_data["username"],
         "role": user_data["role"],
         "exp": datetime.utcnow() + timedelta(hours=expires_hours)
     }
@@ -109,5 +110,4 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-# Initialize Auth database schema on module load
 init_auth_db()
